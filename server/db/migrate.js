@@ -5,6 +5,10 @@
 //   - ALTER TABLE ADD/DROP COLUMN pour évoluer les tables existantes
 //   - Les seeds par défaut ne s'appliquent que si la table est vide
 
+const bcrypt = require('bcryptjs');
+
+const DEFAULT_ADMIN = { username: 'admin', password: 'admin1234' };
+
 const DEFAULT_PLATFORMS = [
   ['basetao',  'Basetao',  '#378ADD', 'Agent populaire',     'https://www.basetao.com/?ref=YOURCODE'],
   ['hipobuy',  'Hipobuy',  '#1D9E75', 'Frais réduits',       'https://www.hipobuy.com/register'],
@@ -207,6 +211,16 @@ function migrate(db) {
 
   // Purge sessions expirées au démarrage
   db.exec("DELETE FROM sessions WHERE expires_at < datetime('now')");
+
+  // Seed admin par défaut si aucun admin n'existe (création ponctuelle, jamais écrasée)
+  const adminCount = db.prepare('SELECT COUNT(*) AS c FROM admin_users').get().c;
+  if (adminCount === 0) {
+    const hash = bcrypt.hashSync(DEFAULT_ADMIN.password, 12);
+    db.prepare('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)')
+      .run(DEFAULT_ADMIN.username, hash);
+    console.log(`[migrate] admin créé : ${DEFAULT_ADMIN.username} / ${DEFAULT_ADMIN.password}`);
+    console.log('⚠️  Changez le mot de passe admin par défaut');
+  }
 
   // --- Settings (clé/valeur) --------------------------------------------
   db.exec(`
