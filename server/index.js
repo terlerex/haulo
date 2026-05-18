@@ -37,7 +37,7 @@ const trackRouter = require('./routes/track');
 const analyticsRouter = require('./routes/analytics');
 
 const app = express();
-
+app.get('/health', (req, res) => res.json({ ok: true }))
 // En prod (Railway), Express est derrière un proxy
 if (config.IS_PROD) app.set('trust proxy', 1);
 
