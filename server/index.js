@@ -1,4 +1,4 @@
-// Haulo — serveur Express + SQLite (node:sqlite)
+// Haulo — serveur Express + SQLite (better-sqlite3)
 //
 // Postgres (Railway/Neon) : voir db.js et db/migrate.js. Brancher un pool `pg`
 // quand process.env.DATABASE_URL est défini.

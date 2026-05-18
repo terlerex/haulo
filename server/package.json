@@ -4,15 +4,13 @@
   "private": true,
   "type": "commonjs",
   "main": "index.js",
-  "engines": {
-    "node": ">=22.5.0"
-  },
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.10.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
