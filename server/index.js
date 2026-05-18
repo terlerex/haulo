@@ -143,6 +143,6 @@ app.use(notFoundApi);
 app.use(errorHandler);
 
 const PORT = config.PORT;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   logger.info('Serveur démarré', { port: PORT, env: config.NODE_ENV });
 });
