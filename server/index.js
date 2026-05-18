@@ -6,6 +6,20 @@
 // IMPORTANT prod (Railway) : server/uploads est éphémère sans Volume monté.
 // Pour persister les images, monter un Volume Railway ou utiliser Cloudinary/S3.
 
+// --- Diagnostics process-level (AVANT tout require/import) ---
+process.on('uncaughtException', (err) => {
+  console.error('=== UNCAUGHT EXCEPTION ===');
+  console.error('Message:', err.message);
+  console.error('Stack:', err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('=== UNHANDLED REJECTION ===');
+  console.error('Error:', err);
+  process.exit(1);
+});
+
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const path = require('path');
@@ -145,4 +159,9 @@ app.use(errorHandler);
 const PORT = config.PORT;
 app.listen(PORT, '0.0.0.0', () => {
   logger.info('Serveur démarré', { port: PORT, env: config.NODE_ENV });
+  console.log('[STARTUP] Server is now listening');
+  console.log('[STARTUP] PORT:', PORT);
+  console.log('[STARTUP] DB_PATH:', process.env.DB_PATH || 'default');
+  console.log('[STARTUP] UPLOADS_DIR:', process.env.UPLOADS_DIR || 'default');
+  console.log('[STARTUP] NODE_ENV:', process.env.NODE_ENV);
 });
