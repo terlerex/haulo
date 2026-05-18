@@ -6,6 +6,10 @@
 // process.env.DATABASE_URL. Adapter placeholders (? -> $1) et types
 // (INTEGER PRIMARY KEY AUTOINCREMENT -> SERIAL PRIMARY KEY).
 
+// MARQUEUR DEPLOY-CHECK : si tu ne vois pas cette ligne dans les logs Railway,
+// le code déployé est ANCIEN (Railway pull/cache cassé).
+console.log('[DB] Loading db.js — driver=better-sqlite3 — build=' + new Date().toISOString());
+
 const path = require('path');
 const Database = require('better-sqlite3');
 const migrate = require('./db/migrate');
