@@ -1,13 +1,14 @@
 [build]
 builder = "nixpacks"
+nixpacksVersion = "1.41.0"
 buildCommand = "npm install && npm install --prefix server && npm run build"
+
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["nodejs_22", "npm-9_x"]
 
 [deploy]
 startCommand = "npm start"
-healthcheckPath = "/"
+healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
-
-[environments.production.variables]
-NODE_ENV = "production"
