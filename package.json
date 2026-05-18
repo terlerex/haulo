@@ -17,6 +17,6 @@
     "concurrently": "^8.2.2"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.0"
+    "better-sqlite3": "^12.2.0"
   }
 }
