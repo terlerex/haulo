@@ -1,0 +1,13 @@
+node_modules/
+client/dist/
+dist/
+db.sqlite
+db.sqlite-journal
+.env
+.env.local
+.env.production
+*.log
+.DS_Store
+# uploads locaux : on garde le dossier (.gitkeep) mais pas son contenu
+server/uploads/*
+!server/uploads/.gitkeep
