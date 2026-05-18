@@ -4,16 +4,19 @@
   "private": true,
   "description": "Plateforme d'affiliation pour produits importés de Chine",
   "scripts": {
-    "dev":        "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
     "dev:server": "npm run dev --prefix server",
     "dev:client": "npm run dev --prefix client",
-    "build":      "npm run build --prefix client",
-    "start":      "node server/index.js",
-    "seed":       "node server/seed.js",
-    "migrate":    "node -e \"require('./server/db')\"",
+    "build": "npm run build --prefix client",
+    "start": "node server/index.js",
+    "seed": "node server/seed.js",
+    "migrate": "node -e \"require('./server/db')\"",
     "postinstall": "npm install --prefix server && npm install --prefix client"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
   }
 }
