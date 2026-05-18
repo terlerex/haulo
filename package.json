@@ -11,7 +11,7 @@
     "start": "node server/index.js",
     "seed": "node server/seed.js",
     "migrate": "node -e \"require('./server/db')\"",
-    "postinstall": "npm install --prefix server && npm install --prefix client"
+    "postinstall": "npm install --prefix server && npm install --include=dev --prefix client"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
