@@ -3,9 +3,7 @@ builder = "nixpacks"
 buildCommand = "npm install && npm install --prefix server && npm run build"
 
 [deploy]
-startCommand = "npm run migrate && npm start"
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+startCommand = "npm start"
 
 [environments.production.variables]
 NODE_ENV = "production"
