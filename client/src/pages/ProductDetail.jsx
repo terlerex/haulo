@@ -87,8 +87,16 @@ export default function ProductDetail() {
           <h1 className="text-2xl sm:text-3xl font-bold">{product.name}</h1>
 
           <div className="mt-3 flex items-baseline gap-3">
-            {product.price_eur && <span className="text-3xl font-extrabold">{product.price_eur} €</span>}
-            {product.price_cny && <span className="text-sub">≈ ¥{product.price_cny}</span>}
+            {product.price_eur_computed != null ? (
+              <span className="text-3xl font-extrabold">€{Number(product.price_eur_computed).toFixed(2)}</span>
+            ) : product.price_eur != null ? (
+              <span className="text-3xl font-extrabold">{product.price_eur} €</span>
+            ) : null}
+            {product.price_cny_numeric != null ? (
+              <span className="text-sub">¥{product.price_cny_numeric}</span>
+            ) : product.price_cny ? (
+              <span className="text-sub">≈ ¥{product.price_cny}</span>
+            ) : null}
           </div>
 
           {product.description && <p className="mt-4 text-sub leading-relaxed">{product.description}</p>}

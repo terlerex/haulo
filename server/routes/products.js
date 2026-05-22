@@ -2,10 +2,17 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { deleteUploadedFile } = require('./upload');
+const { convertCnyToEur, getRateAndMargin } = require('../jobs/exchangeRate');
 
 const router = express.Router();
 
-const BASE_FIELDS = ['name', 'category_id', 'price_eur', 'price_cny', 'image_url', 'description', 'badge_id', 'is_active', 'is_featured'];
+const BASE_FIELDS = [
+  'name', 'category_id', 'price_eur', 'price_cny',
+  'price_cny_numeric', 'price_eur_override',
+  'image_url', 'description', 'badge_id', 'is_active', 'is_featured',
+];
+
+const NUMERIC_PRICE_FIELDS = new Set(['price_eur', 'price_cny', 'price_cny_numeric', 'price_eur_override']);
 
 function normalizeProductInput(body, { partial = false } = {}) {
   const out = {};
@@ -23,7 +30,7 @@ function normalizeProductInput(body, { partial = false } = {}) {
     if (k === 'category_id' || k === 'badge_id') {
       v = v === '' || v === null || v === undefined ? null : Number(v);
     }
-    if (k === 'price_eur' || k === 'price_cny') {
+    if (NUMERIC_PRICE_FIELDS.has(k)) {
       v = v === '' || v === null ? null : Number(v);
       if (v !== null && Number.isNaN(v)) {
         const err = new Error(`${k} must be a number`);
@@ -37,7 +44,9 @@ function normalizeProductInput(body, { partial = false } = {}) {
 }
 
 const PRODUCT_SELECT = `
-  SELECT p.id, p.name, p.price_eur, p.price_cny, p.image_url, p.description,
+  SELECT p.id, p.name, p.price_eur, p.price_cny,
+         p.price_cny_numeric, p.price_eur_override,
+         p.image_url, p.description,
          p.is_active, p.is_featured, p.created_at,
          p.category_id, c.name AS category_name, c.emoji AS category_emoji,
          p.badge_id, b.slug AS badge_slug, b.label AS badge_label,
@@ -48,13 +57,30 @@ const PRODUCT_SELECT = `
   LEFT JOIN badges b ON b.id = p.badge_id
 `;
 
-function shapeProduct(row) {
+function shapeProduct(row, rate, margin) {
   if (!row) return row;
-  const out = {
+  // Calcul du prix EUR final :
+  //   1) price_eur_override si présent (valeur figée par l'admin)
+  //   2) sinon convert(price_cny_numeric)
+  //   3) sinon ancien price_eur (rétrocompat)
+  let priceEurComputed = null;
+  if (row.price_eur_override != null) {
+    priceEurComputed = Number(row.price_eur_override);
+  } else if (row.price_cny_numeric != null) {
+    priceEurComputed = convertCnyToEur(row.price_cny_numeric, rate, margin);
+  } else if (row.price_eur != null) {
+    const n = Number(row.price_eur);
+    priceEurComputed = Number.isFinite(n) ? n : null;
+  }
+
+  return {
     id: row.id,
     name: row.name,
     price_eur: row.price_eur,
     price_cny: row.price_cny,
+    price_cny_numeric: row.price_cny_numeric,
+    price_eur_override: row.price_eur_override,
+    price_eur_computed: priceEurComputed,
     image_url: row.image_url,
     description: row.description,
     is_active: row.is_active,
@@ -76,7 +102,6 @@ function shapeProduct(row) {
       : null,
     links_count: row.links_count,
   };
-  return out;
 }
 
 // GET /api/products
@@ -109,13 +134,15 @@ router.get('/', (req, res) => {
   `).all(...params, limit, offset);
 
   const total = db.prepare(`SELECT COUNT(*) AS c FROM products p ${whereSql}`).get(...params).c;
-  res.json({ items: rows.map(shapeProduct), total, limit, offset });
+  const { rate, margin } = getRateAndMargin();
+  res.json({ items: rows.map((r) => shapeProduct(r, rate, margin)), total, limit, offset });
 });
 
 router.get('/:id', (req, res) => {
   const row = db.prepare(`${PRODUCT_SELECT} WHERE p.id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-  const product = shapeProduct(row);
+  const { rate, margin } = getRateAndMargin();
+  const product = shapeProduct(row, rate, margin);
   product.links = db.prepare(`
     SELECT al.id, al.platform_id, al.url, al.price_cny,
            pl.slug, pl.name, pl.color_hex, pl.tagline, pl.register_url
@@ -129,15 +156,31 @@ router.get('/:id', (req, res) => {
 
 router.post('/', requireAuth, (req, res) => {
   const data = normalizeProductInput(req.body);
+
+  // Si price_cny_numeric fourni sans price_eur, on calcule et stocke price_eur (legacy)
+  let priceEur = data.price_eur ?? null;
+  if (priceEur == null && data.price_cny_numeric != null && data.price_eur_override == null) {
+    priceEur = convertCnyToEur(data.price_cny_numeric);
+  }
+  if (priceEur == null && data.price_eur_override != null) {
+    priceEur = data.price_eur_override;
+  }
+
   const stmt = db.prepare(`
-    INSERT INTO products (name, category_id, price_eur, price_cny, image_url, description, badge_id, is_active, is_featured)
-    VALUES (@name, @category_id, @price_eur, @price_cny, @image_url, @description, @badge_id, @is_active, @is_featured)
+    INSERT INTO products
+      (name, category_id, price_eur, price_cny, price_cny_numeric, price_eur_override,
+       image_url, description, badge_id, is_active, is_featured)
+    VALUES
+      (@name, @category_id, @price_eur, @price_cny, @price_cny_numeric, @price_eur_override,
+       @image_url, @description, @badge_id, @is_active, @is_featured)
   `);
   const filled = {
     name: data.name,
     category_id: data.category_id ?? null,
-    price_eur: data.price_eur ?? null,
+    price_eur: priceEur,
     price_cny: data.price_cny ?? null,
+    price_cny_numeric: data.price_cny_numeric ?? null,
+    price_eur_override: data.price_eur_override ?? null,
     image_url: data.image_url ?? null,
     description: data.description ?? null,
     badge_id: data.badge_id ?? null,
@@ -146,16 +189,18 @@ router.post('/', requireAuth, (req, res) => {
   };
   const info = stmt.run(filled);
   const row = db.prepare(`${PRODUCT_SELECT} WHERE p.id = ?`).get(Number(info.lastInsertRowid));
-  res.status(201).json(shapeProduct(row));
+  const { rate, margin } = getRateAndMargin();
+  res.status(201).json(shapeProduct(row, rate, margin));
 });
 
 router.put('/:id', requireAuth, (req, res) => {
-  const existing = db.prepare('SELECT image_url FROM products WHERE id = ?').get(req.params.id);
+  const existing = db.prepare('SELECT image_url, price_cny_numeric, price_eur_override FROM products WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
   const data = normalizeProductInput(req.body, { partial: true });
   if (!Object.keys(data).length) {
     const row = db.prepare(`${PRODUCT_SELECT} WHERE p.id = ?`).get(req.params.id);
-    return res.json(shapeProduct(row));
+    const { rate, margin } = getRateAndMargin();
+    return res.json(shapeProduct(row, rate, margin));
   }
 
   // si on remplace image_url et que l'ancienne était un upload local, on la supprime
@@ -163,10 +208,22 @@ router.put('/:id', requireAuth, (req, res) => {
     deleteUploadedFile(existing.image_url);
   }
 
+  // Auto-sync price_eur (legacy) si CNY change et pas d'override
+  if (data.price_cny_numeric !== undefined && data.price_eur === undefined) {
+    const overrideAfter = data.price_eur_override !== undefined ? data.price_eur_override : existing.price_eur_override;
+    if (overrideAfter == null && data.price_cny_numeric != null) {
+      data.price_eur = convertCnyToEur(data.price_cny_numeric);
+    }
+  }
+  if (data.price_eur_override !== undefined && data.price_eur === undefined && data.price_eur_override != null) {
+    data.price_eur = data.price_eur_override;
+  }
+
   const sets = Object.keys(data).map((k) => `${k} = @${k}`).join(', ');
   db.prepare(`UPDATE products SET ${sets} WHERE id = @id`).run({ ...data, id: Number(req.params.id) });
   const row = db.prepare(`${PRODUCT_SELECT} WHERE p.id = ?`).get(req.params.id);
-  res.json(shapeProduct(row));
+  const { rate, margin } = getRateAndMargin();
+  res.json(shapeProduct(row, rate, margin));
 });
 
 router.delete('/:id', requireAuth, (req, res) => {

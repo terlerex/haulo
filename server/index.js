@@ -35,6 +35,7 @@ const logger = require('./utils/logger');
 const { errorHandler, notFoundApi } = require('./middleware/errorHandler');
 
 require('./db'); // init schema + migrations + seeds référentiels
+require('./jobs/exchangeRate').start(); // fetch initial + tick 24h
 
 const productsRouter = require('./routes/products');
 const { publicRouter: platformsPublic, adminRouter: platformsAdmin } = require('./routes/platforms');
@@ -49,6 +50,8 @@ const settingsRouter = require('./routes/settings');
 const { publicRouter: socialPublic, adminRouter: socialAdmin } = require('./routes/socialLinks');
 const trackRouter = require('./routes/track');
 const analyticsRouter = require('./routes/analytics');
+const exchangeRateRouter = require('./routes/exchangeRate');
+const { productPriceRouter } = require('./routes/exchangeRate');
 
 const app = express();
 app.get('/health', (req, res) => res.json({ ok: true }))
@@ -138,6 +141,8 @@ app.use('/api/admin/platforms', platformsAdmin);
 app.use('/api/admin/settings', settingsRouter.admin);
 app.use('/api/admin/social-links', socialAdmin);
 app.use('/api/admin/analytics', analyticsRouter);
+app.use('/api/admin/exchange-rate', exchangeRateRouter);
+app.use('/api/admin/products', productPriceRouter);
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

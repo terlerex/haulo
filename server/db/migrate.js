@@ -27,6 +27,10 @@ const DEFAULT_BADGES = [
 ];
 
 const DEFAULT_SETTINGS = {
+  exchange_rate_cny_eur:     '0.128',
+  exchange_rate_auto_update: 'true',
+  exchange_rate_last_update: '',
+  exchange_rate_margin_pct:  '10',
   site_logo_url:       '',
   site_logo_size:      '32',
   site_name:           'Haulo',
@@ -134,6 +138,8 @@ function migrate(db) {
         category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
         price_eur REAL,
         price_cny REAL,
+        price_cny_numeric REAL DEFAULT NULL,
+        price_eur_override REAL DEFAULT NULL,
         image_url TEXT,
         description TEXT,
         badge_id INTEGER REFERENCES badges(id) ON DELETE SET NULL,
@@ -152,6 +158,12 @@ function migrate(db) {
     if (!cols.has('is_featured')) {
       db.exec('ALTER TABLE products ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0');
       db.exec('CREATE INDEX IF NOT EXISTS idx_products_featured ON products(is_featured)');
+    }
+    if (!cols.has('price_cny_numeric')) {
+      db.exec('ALTER TABLE products ADD COLUMN price_cny_numeric REAL DEFAULT NULL');
+    }
+    if (!cols.has('price_eur_override')) {
+      db.exec('ALTER TABLE products ADD COLUMN price_eur_override REAL DEFAULT NULL');
     }
 
     // Migrer données depuis anciennes colonnes textuelles si présentes

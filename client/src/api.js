@@ -76,6 +76,12 @@ export const api = {
   // Stats
   stats: () => request('/stats'),
 
+  // Exchange rate (admin)
+  refreshExchangeRate: () =>
+    request('/admin/exchange-rate/refresh', { method: 'POST' }),
+  recalculatePrices: () =>
+    request('/admin/products/recalculate-prices', { method: 'POST' }),
+
   // Analytics (admin)
   analyticsOverview:   (days = 30) => request(`/admin/analytics/overview?days=${days}`),
   analyticsTimeseries: (days = 30, metric = 'views') => request(`/admin/analytics/timeseries?days=${days}&metric=${metric}`),
@@ -104,6 +110,18 @@ export const api = {
     request(`/admin/social-links/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSocialLink: (id) => request(`/admin/social-links/${id}`, { method: 'DELETE' }),
 };
+
+// Conversion CNY → EUR côté client (mirroir de server/jobs/exchangeRate.js)
+export function convertCnyToEur(cny, rate, margin) {
+  if (cny == null || cny === '') return null;
+  const n = Number(cny);
+  if (!Number.isFinite(n)) return null;
+  const r = parseFloat(rate);
+  const m = parseFloat(margin);
+  const rr = Number.isFinite(r) ? r : 0.128;
+  const mm = Number.isFinite(m) ? m : 0;
+  return Math.round(n * rr * (1 + mm / 100) * 100) / 100;
+}
 
 // Slugify helper (badges)
 export function slugify(s) {

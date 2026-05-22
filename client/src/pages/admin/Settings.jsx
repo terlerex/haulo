@@ -34,6 +34,8 @@ export default function Settings() {
 
       <LogoSection />
 
+      <ExchangeRateSection all={all} set={set} saveSection={saveSection} />
+
       {/* Identité */}
       <Section
         title="Identité du site"
@@ -204,6 +206,150 @@ function Toggle({ checked, onChange, label }) {
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="w-4 h-4 accent-emerald-500" />
       <span className="text-sm">{label}</span>
     </label>
+  );
+}
+
+function timeAgo(iso) {
+  if (!iso) return 'jamais';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return iso;
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return 'à l’instant';
+  if (m < 60) return `il y a ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `il y a ${h}h`;
+  const d = Math.floor(h / 24);
+  return `il y a ${d}j`;
+}
+
+function convertCnyToEurLocal(cny, rate, margin) {
+  const n = Number(cny);
+  if (!Number.isFinite(n)) return null;
+  const r = parseFloat(rate);
+  const m = parseFloat(margin);
+  const rr = Number.isFinite(r) ? r : 0.128;
+  const mm = Number.isFinite(m) ? m : 0;
+  return Math.round(n * rr * (1 + mm / 100) * 100) / 100;
+}
+
+function ExchangeRateSection({ all, set, saveSection }) {
+  const { reload } = useSite();
+  const toast = useToast();
+  const [refreshing, setRefreshing] = useState(false);
+  const [recalculating, setRecalculating] = useState(false);
+
+  const rate = all.exchange_rate_cny_eur || '0.128';
+  const margin = all.exchange_rate_margin_pct || '0';
+  const auto = all.exchange_rate_auto_update === 'true';
+  const lastUpdate = all.exchange_rate_last_update || '';
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const r = await api.refreshExchangeRate();
+      toast.success(`Taux rafraîchi : ${r.rate}`);
+      await reload();
+      // Met aussi à jour l'état local pour refléter immédiatement
+      set('exchange_rate_cny_eur', String(r.rate));
+      set('exchange_rate_last_update', r.last_update);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const onRecalculate = async () => {
+    if (!confirm('Recalculer le prix EUR de tous les produits non-override ?')) return;
+    setRecalculating(true);
+    try {
+      const r = await api.recalculatePrices();
+      toast.success(`${r.updated} produit(s) recalculé(s)`);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setRecalculating(false);
+    }
+  };
+
+  return (
+    <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+      <header className="flex items-start justify-between mb-4 gap-4 flex-wrap">
+        <div>
+          <h2 className="text-lg font-semibold">💱 Taux de change CNY → EUR</h2>
+          <p className="text-sm text-sub mt-0.5">
+            Conversion automatique des prix produits. Source : frankfurter.app
+          </p>
+        </div>
+        <button
+          onClick={() => saveSection(['exchange_rate_cny_eur', 'exchange_rate_margin_pct', 'exchange_rate_auto_update'])}
+          className="px-4 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold"
+        >
+          Enregistrer
+        </button>
+      </header>
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Taux actuel (1 ¥ = X €)">
+          <input
+            type="number" step="0.0001" min="0"
+            value={rate}
+            onChange={(e) => set('exchange_rate_cny_eur', e.target.value)}
+            className="input"
+          />
+        </Field>
+        <Field label="Marge à appliquer (%)">
+          <input
+            type="number" step="0.1" min="0"
+            value={margin}
+            onChange={(e) => set('exchange_rate_margin_pct', e.target.value)}
+            className="input"
+          />
+        </Field>
+      </div>
+
+      <Toggle
+        checked={auto}
+        onChange={(v) => set('exchange_rate_auto_update', v ? 'true' : 'false')}
+        label="Mise à jour automatique quotidienne (frankfurter.app)"
+      />
+
+      <div className="text-xs text-sub mt-1">
+        Dernière mise à jour : {timeAgo(lastUpdate)}
+        {lastUpdate && <span className="ml-2 opacity-60">({lastUpdate.slice(0, 16).replace('T', ' ')} UTC)</span>}
+      </div>
+
+      <div className="flex flex-wrap gap-2 pt-4 border-t border-zinc-800 mt-4">
+        <button
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm disabled:opacity-50"
+        >
+          {refreshing ? 'Récupération…' : '🔄 Rafraîchir le taux maintenant'}
+        </button>
+        <button
+          onClick={onRecalculate}
+          disabled={recalculating}
+          className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm disabled:opacity-50"
+        >
+          {recalculating ? 'Calcul…' : '🧮 Recalculer tous les prix EUR'}
+        </button>
+      </div>
+
+      <div className="mt-4 pt-3 border-t border-zinc-800">
+        <div className="text-xs uppercase tracking-wider text-sub mb-2">Aperçu</div>
+        <div className="text-sm space-y-1 font-mono">
+          {[100, 500, 1000].map((v) => (
+            <div key={v} className="flex gap-3">
+              <span className="text-sub w-20 text-right">{v} ¥</span>
+              <span>→</span>
+              <span className="text-emerald-400 font-semibold">€{convertCnyToEurLocal(v, rate, margin)?.toFixed(2)}</span>
+              <span className="text-sub text-xs opacity-60">(taux {parseFloat(rate).toFixed(4)} + marge {margin}%)</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 

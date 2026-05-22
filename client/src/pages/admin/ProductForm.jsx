@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../api.js';
+import { api, convertCnyToEur } from '../../api.js';
 import { useToast } from '../../components/Toast.jsx';
 import ImagePicker from '../../components/ImagePicker.jsx';
+import { useSite } from '../../context/SiteContext.jsx';
 
 const EMPTY = {
   name: '',
   category_id: '',
+  price_cny_numeric: '',
+  price_eur_override: '',
+  // legacy strings (rétrocompat, plus saisies manuellement)
   price_eur: '',
   price_cny: '',
   image_url: '',
@@ -20,14 +24,27 @@ export default function ProductForm() {
   const isEdit = !!id;
   const nav = useNavigate();
   const toast = useToast();
+  const { settings } = useSite();
 
   const [form, setForm] = useState(EMPTY);
+  const [overrideEnabled, setOverrideEnabled] = useState(false);
   const [categories, setCategories] = useState([]);
   const [badges, setBadges] = useState([]);
   const [platforms, setPlatforms] = useState([]);
   const [links, setLinks] = useState({});
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
+
+  const rate = settings?.exchange_rate_cny_eur ?? '0.128';
+  const margin = settings?.exchange_rate_margin_pct ?? '0';
+
+  // Calcul du prix EUR affiché live sous le champ CNY
+  const livePriceEur = useMemo(() => {
+    if (overrideEnabled && form.price_eur_override !== '') {
+      return Number(form.price_eur_override);
+    }
+    return convertCnyToEur(form.price_cny_numeric, rate, margin);
+  }, [form.price_cny_numeric, form.price_eur_override, overrideEnabled, rate, margin]);
 
   useEffect(() => {
     Promise.all([api.listCategories(), api.listBadges(), api.listPlatforms()])
@@ -49,6 +66,8 @@ export default function ProductForm() {
         setForm({
           name: p.name || '',
           category_id: p.category_id ?? '',
+          price_cny_numeric: p.price_cny_numeric ?? '',
+          price_eur_override: p.price_eur_override ?? '',
           price_eur: p.price_eur ?? '',
           price_cny: p.price_cny ?? '',
           image_url: p.image_url || '',
@@ -56,6 +75,7 @@ export default function ProductForm() {
           badge_id: p.badge_id ?? '',
           is_active: p.is_active ? 1 : 0,
         });
+        setOverrideEnabled(p.price_eur_override != null);
         const map = {};
         (p.links || []).forEach((l) => {
           map[l.platform_id] = { url: l.url, price_cny: l.price_cny ?? '', id: l.id };
@@ -81,14 +101,23 @@ export default function ProductForm() {
     if (!form.name.trim()) return toast.error('Nom requis');
     setSaving(true);
     try {
+      const cnyNum = form.price_cny_numeric === '' ? null : Number(form.price_cny_numeric);
+      const overrideNum = overrideEnabled && form.price_eur_override !== ''
+        ? Number(form.price_eur_override)
+        : null;
+
       const payload = {
-        ...form,
+        name: form.name,
         category_id: form.category_id === '' ? null : Number(form.category_id),
         badge_id: form.badge_id === '' ? null : Number(form.badge_id),
-        price_eur: form.price_eur === '' ? null : Number(form.price_eur),
-        price_cny: form.price_cny === '' ? null : Number(form.price_cny),
+        price_cny_numeric: cnyNum,
+        price_eur_override: overrideNum,
+        // Le serveur recalcule price_eur (legacy) automatiquement, on l'envoie pas
+        image_url: form.image_url,
+        description: form.description,
         is_active: form.is_active ? 1 : 0,
       };
+
       const saved = isEdit
         ? await api.updateProduct(id, payload)
         : await api.createProduct(payload);
@@ -143,15 +172,66 @@ export default function ProductForm() {
           </Field>
         </div>
 
-        <div className="grid sm:grid-cols-3 gap-4">
-          <Field label="Prix € (EUR)">
-            <input type="number" step="0.01" value={form.price_eur} onChange={(e) => update('price_eur', e.target.value)} className="input" />
+        {/* Section prix — refonte */}
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-sub">Prix</h2>
+
+          <Field label="Prix en ¥ CNY">
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={form.price_cny_numeric}
+              onChange={(e) => update('price_cny_numeric', e.target.value)}
+              className="input"
+              placeholder="Ex: 500"
+            />
+            <div className="text-xs text-sub mt-1">
+              {form.price_cny_numeric === '' ? (
+                <span>Saisis un prix en ¥ pour voir l'équivalent EUR calculé automatiquement.</span>
+              ) : (
+                <>
+                  ≈ <span className="text-emerald-400 font-semibold">€{livePriceEur != null ? livePriceEur.toFixed(2) : '—'}</span>
+                  {' '}<span className="opacity-60">(taux: {parseFloat(rate).toFixed(3)} · marge: {margin}%)</span>
+                </>
+              )}
+            </div>
           </Field>
-          <Field label="Prix ¥ (CNY)">
-            <input type="number" step="0.01" value={form.price_cny} onChange={(e) => update('price_cny', e.target.value)} className="input" />
-          </Field>
+
+          <label className="flex items-center gap-3 cursor-pointer pt-2 border-t border-zinc-800">
+            <input
+              type="checkbox"
+              checked={overrideEnabled}
+              onChange={(e) => {
+                setOverrideEnabled(e.target.checked);
+                if (!e.target.checked) update('price_eur_override', '');
+              }}
+              className="w-4 h-4 accent-emerald-500"
+            />
+            <span className="text-sm">Forcer un prix EUR personnalisé</span>
+          </label>
+
+          {overrideEnabled && (
+            <Field label="Prix EUR personnalisé (override)">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={form.price_eur_override}
+                onChange={(e) => update('price_eur_override', e.target.value)}
+                className="input"
+                placeholder="Ex: 65.00"
+              />
+              <div className="text-xs text-amber-400 mt-1">
+                ⚠️ Cette valeur écrase le calcul automatique CNY → EUR.
+              </div>
+            </Field>
+          )}
+        </div>
+
+        <div>
           <Field label="Badge">
-            <select value={form.badge_id} onChange={(e) => update('badge_id', e.target.value)} className="input">
+            <select value={form.badge_id} onChange={(e) => update('badge_id', e.target.value)} className="input max-w-xs">
               <option value="">— Aucun —</option>
               {badges.map((b) => (
                 <option key={b.id} value={b.id}>{b.label}</option>

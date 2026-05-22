@@ -48,9 +48,18 @@ export default function ProductCard({ product }) {
         <span className="text-xs text-sub uppercase tracking-wide">{categoryName}</span>
         <h3 className="font-medium text-sm line-clamp-2 flex-1">{product.name}</h3>
         <div className="flex items-center justify-between pt-1">
-          <span className="font-bold">
-            {product.price_eur ? `${product.price_eur} €` : '—'}
-          </span>
+          <div className="flex items-baseline gap-1.5">
+            <span className="font-bold">
+              {product.price_eur_computed != null
+                ? `€${Number(product.price_eur_computed).toFixed(2)}`
+                : product.price_eur != null
+                  ? `${product.price_eur} €`
+                  : '—'}
+            </span>
+            {product.price_cny_numeric != null && (
+              <span className="text-xs text-sub">¥{product.price_cny_numeric}</span>
+            )}
+          </div>
           {product.links_count !== undefined && (
             <span className="text-xs text-sub">
               {product.links_count} agent{product.links_count > 1 ? 's' : ''}

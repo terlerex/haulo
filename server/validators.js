@@ -25,15 +25,17 @@ const passwordChangeSchema = z.object({
 
 // ---------- Product ----------
 const productSchema = z.object({
-  name:        z.string().min(1).max(200),
-  category_id: nullableNumber.optional(),
-  price_eur:   nullableNumber.optional(),
-  price_cny:   nullableNumber.optional(),
-  image_url:   z.string().max(1000).optional().nullable(),
-  description: z.string().max(2000).optional().nullable(),
-  badge_id:    nullableNumber.optional(),
-  is_active:   boolish.optional(),
-  is_featured: boolish.optional(),
+  name:               z.string().min(1).max(200),
+  category_id:        nullableNumber.optional(),
+  price_eur:          nullableNumber.optional(),
+  price_cny:          nullableNumber.optional(),
+  price_cny_numeric:  nullableNumber.optional(),
+  price_eur_override: nullableNumber.optional(),
+  image_url:          z.string().max(1000).optional().nullable(),
+  description:        z.string().max(2000).optional().nullable(),
+  badge_id:           nullableNumber.optional(),
+  is_active:          boolish.optional(),
+  is_featured:        boolish.optional(),
 }).partial({ name: false });
 
 // Pour PUT : tout optionnel sauf cohérence des types
