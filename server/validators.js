@@ -43,13 +43,15 @@ const productPatchSchema = productSchema.partial();
 
 // ---------- Platform ----------
 const platformSchema = z.object({
-  name:         z.string().min(1).max(100),
-  slug:         slugStr.optional(),
-  color_hex:    hexColor,
-  tagline:      z.string().max(100).optional().nullable(),
-  register_url: z.string().max(1000).optional().nullable(),
-  is_active:    boolish.optional(),
-  sort_order:   z.number().int().min(0).optional(),
+  name:           z.string().min(1).max(100),
+  slug:           slugStr.optional(),
+  color_hex:      hexColor,
+  tagline:        z.string().max(100).optional().nullable(),
+  register_url:   z.string().max(1000).optional().nullable(),
+  is_active:      boolish.optional(),
+  sort_order:     z.number().int().min(0).optional(),
+  url_template:   z.string().max(2000).optional().nullable(),
+  affiliate_code: z.string().max(200).optional().nullable(),
 });
 const platformPatchSchema = platformSchema.partial();
 

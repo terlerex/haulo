@@ -193,6 +193,27 @@ function Toggle({ checked, onChange }) {
   );
 }
 
+const DEFAULT_TEMPLATES = {
+  kakobuy:  'https://www.kakobuy.com/item/details?url={source_url_encoded}&affcode={affcode}',
+  hipobuy:  'https://hipobuy.com/product/{platform}/{id}?inviteCode={affcode}',
+  cnfans:   'https://cnfans.com/product/?shop_type={platform}&id={id}&ref={affcode}',
+  mulebuy:  'https://mulebuy.com/product/?shop_type={platform}&id={id}&affcode={affcode}',
+  superbuy: 'https://www.superbuy.com/en/page/buy?from=search-input&url={source_url_encoded}&partnercode={affcode}',
+  basetao:  'https://www.basetao.com/products/agent/{platform}/{id}.html?ref={affcode}',
+  wegobuy:  'https://www.wegobuy.com/en/page/buy?from=search-input&url={source_url_encoded}&promotionCode={affcode}',
+  joyabuy:  'https://joyabuy.com/product/?shop_type={platform}&id={id}&ref={affcode}',
+};
+
+function buildAffiliateUrlClient(template, source, affcode) {
+  if (!template || !source) return '';
+  return template
+    .replace(/\{source_url_encoded\}/g, encodeURIComponent(source.originalUrl))
+    .replace(/\{source_url\}/g, source.originalUrl)
+    .replace(/\{platform\}/g, source.platform)
+    .replace(/\{id\}/g, source.id)
+    .replace(/\{affcode\}/g, affcode || '');
+}
+
 function PlatformModal({ initial, onClose, onSaved }) {
   const toast = useToast();
   const isEdit = !!initial?.id;
@@ -203,11 +224,33 @@ function PlatformModal({ initial, onClose, onSaved }) {
     register_url: initial.register_url || '',
     is_active: initial.is_active ? 1 : 0,
     sort_order: initial.sort_order ?? 1,
+    url_template: initial.url_template || '',
+    affiliate_code: initial.affiliate_code || '',
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
+  const [showAffcode, setShowAffcode] = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const defaultTpl = initial?.slug ? DEFAULT_TEMPLATES[initial.slug] : '';
+  const hasAffcodePlaceholder = form.url_template.includes('{affcode}');
+  const noAffcodeButPlaceholder = hasAffcodePlaceholder && !form.affiliate_code.trim();
+
+  const runTest = () => {
+    const source = { platform: 'taobao', id: '123456789', originalUrl: 'https://item.taobao.com/item.htm?id=123456789' };
+    setTestResult(buildAffiliateUrlClient(form.url_template, source, form.affiliate_code));
+  };
+
+  const restoreDefault = () => {
+    if (defaultTpl) {
+      update('url_template', defaultTpl);
+      toast.success('Template par défaut restauré');
+    } else {
+      toast.error('Pas de template par défaut pour ce slug');
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -275,8 +318,91 @@ function PlatformModal({ initial, onClose, onSaved }) {
             </Field>
           </div>
 
+          {/* ============ Configuration affilié ============ */}
+          <details open className="pt-2 border-t border-zinc-800">
+            <summary className="cursor-pointer text-sm font-semibold uppercase tracking-wider text-sub py-2">
+              Configuration affilié
+            </summary>
+
+            <div className="space-y-3 mt-2">
+              <Field label="Template d'URL d'affiliation">
+                <textarea
+                  rows={3}
+                  value={form.url_template}
+                  onChange={(e) => update('url_template', e.target.value)}
+                  className="input resize-y font-mono text-xs"
+                  placeholder="https://www.agent.com/buy?url={source_url_encoded}&affcode={affcode}"
+                />
+                <div className="text-xs text-sub mt-1 leading-relaxed">
+                  <div className="font-semibold text-zinc-300 mb-1">Placeholders disponibles :</div>
+                  <div><code className="text-emerald-400">{'{source_url}'}</code> → URL source complète</div>
+                  <div><code className="text-emerald-400">{'{source_url_encoded}'}</code> → URL source URL-encodée</div>
+                  <div><code className="text-emerald-400">{'{platform}'}</code> → taobao | weidian | 1688 | tmall</div>
+                  <div><code className="text-emerald-400">{'{id}'}</code> → ID du produit</div>
+                  <div><code className="text-emerald-400">{'{affcode}'}</code> → ton code affilié (champ ci-dessous)</div>
+                </div>
+              </Field>
+
+              <Field label="Code affilié / Invite code">
+                <div className="flex gap-2">
+                  <input
+                    type={showAffcode ? 'text' : 'password'}
+                    value={form.affiliate_code}
+                    onChange={(e) => update('affiliate_code', e.target.value)}
+                    className="input flex-1"
+                    placeholder="Ex: HRNP37DFO"
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowAffcode((s) => !s)}
+                    className="px-3 rounded-md bg-zinc-800 hover:bg-zinc-700 text-sm"
+                    title={showAffcode ? 'Cacher' : 'Révéler'}
+                  >
+                    {showAffcode ? '🙈' : '👁'}
+                  </button>
+                </div>
+              </Field>
+
+              {noAffcodeButPlaceholder && (
+                <div className="text-xs text-red-300 bg-red-950/40 border border-red-900/50 rounded-md px-3 py-2">
+                  ⚠️ Ce template contient <code>{'{affcode}'}</code> mais aucun code affilié n'est renseigné,
+                  vos commissions ne seront pas tracées.
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={runTest}
+                  className="px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-xs"
+                >
+                  🧪 Tester avec une URL Taobao
+                </button>
+                {defaultTpl && (
+                  <button
+                    type="button"
+                    onClick={restoreDefault}
+                    className="px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-xs"
+                  >
+                    ↺ Restaurer le template par défaut
+                  </button>
+                )}
+              </div>
+
+              {testResult !== null && (
+                <div className="text-xs">
+                  <div className="text-sub mb-1">Résultat du test :</div>
+                  <code className="block p-2 rounded bg-zinc-950 border border-zinc-800 break-all">
+                    {testResult || '(vide)'}
+                  </code>
+                </div>
+              )}
+            </div>
+          </details>
+
           {/* Aperçu live */}
-          <div className="pt-2">
+          <div className="pt-2 border-t border-zinc-800">
             <div className="text-xs uppercase tracking-wider text-sub mb-2">Aperçu</div>
             <div className="space-y-2">
               <div className="flex items-center gap-2">

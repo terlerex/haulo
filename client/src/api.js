@@ -76,6 +76,10 @@ export const api = {
   // Stats
   stats: () => request('/stats'),
 
+  // Link generator (admin)
+  generateLinks: (source_url) =>
+    request('/admin/generate-links', { method: 'POST', body: JSON.stringify({ source_url }) }),
+
   // Exchange rate (admin)
   refreshExchangeRate: () =>
     request('/admin/exchange-rate/refresh', { method: 'POST' }),

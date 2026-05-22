@@ -64,7 +64,7 @@ adminRouter.put('/:id', validateBody(platformPatchSchema), (req, res) => {
   const existing = db.prepare('SELECT * FROM platforms WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Agent introuvable' });
 
-  const allowed = ['name', 'color_hex', 'tagline', 'register_url', 'is_active', 'sort_order', 'slug'];
+  const allowed = ['name', 'color_hex', 'tagline', 'register_url', 'is_active', 'sort_order', 'slug', 'url_template', 'affiliate_code'];
   const updates = {};
   for (const k of allowed) {
     if (req.body[k] === undefined) continue;

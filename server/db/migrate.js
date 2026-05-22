@@ -92,7 +92,9 @@ function migrate(db) {
       tagline TEXT,
       register_url TEXT NOT NULL,
       is_active INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      url_template TEXT DEFAULT '',
+      affiliate_code TEXT DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS badges (
@@ -112,6 +114,36 @@ function migrate(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Migration des colonnes affiliate sur platforms (idempotent)
+  if (tableExists(db, 'platforms')) {
+    const plCols = colNames(db, 'platforms');
+    if (!plCols.has('url_template')) {
+      db.exec("ALTER TABLE platforms ADD COLUMN url_template TEXT DEFAULT ''");
+    }
+    if (!plCols.has('affiliate_code')) {
+      db.exec("ALTER TABLE platforms ADD COLUMN affiliate_code TEXT DEFAULT ''");
+    }
+  }
+
+  // Templates par défaut — UPSERT idempotent : ne touche pas un template déjà rempli
+  const DEFAULT_TEMPLATES = {
+    kakobuy:  'https://www.kakobuy.com/item/details?url={source_url_encoded}&affcode={affcode}',
+    hipobuy:  'https://hipobuy.com/product/{platform}/{id}?inviteCode={affcode}',
+    cnfans:   'https://cnfans.com/product/?shop_type={platform}&id={id}&ref={affcode}',
+    mulebuy:  'https://mulebuy.com/product/?shop_type={platform}&id={id}&affcode={affcode}',
+    superbuy: 'https://www.superbuy.com/en/page/buy?from=search-input&url={source_url_encoded}&partnercode={affcode}',
+    basetao:  'https://www.basetao.com/products/agent/{platform}/{id}.html?ref={affcode}',
+    wegobuy:  'https://www.wegobuy.com/en/page/buy?from=search-input&url={source_url_encoded}&promotionCode={affcode}',
+    joyabuy:  'https://joyabuy.com/product/?shop_type={platform}&id={id}&ref={affcode}',
+  };
+  if (tableExists(db, 'platforms')) {
+    const upd = db.prepare(`
+      UPDATE platforms SET url_template = ?
+      WHERE slug = ? AND (url_template IS NULL OR url_template = '')
+    `);
+    Object.entries(DEFAULT_TEMPLATES).forEach(([slug, tpl]) => upd.run(tpl, slug));
+  }
 
   // Seed catégories d'abord (référencées par products)
   if (db.prepare('SELECT COUNT(*) AS c FROM categories').get().c === 0) {

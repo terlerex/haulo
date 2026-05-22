@@ -35,6 +35,13 @@ export default function ProductForm() {
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
 
+  // LinkGenerator state
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [genBusy, setGenBusy] = useState(false);
+  const [genResult, setGenResult] = useState(null); // { source, links } | null
+  const [genError, setGenError] = useState(null);
+  const [showManual, setShowManual] = useState(false);
+
   const rate = settings?.exchange_rate_cny_eur ?? '0.128';
   const margin = settings?.exchange_rate_margin_pct ?? '0';
 
@@ -258,44 +265,139 @@ export default function ProductForm() {
           <span className="text-sm">Produit actif (visible sur le site public)</span>
         </label>
 
+        {/* ============ LIENS AFFILIÉS ============ */}
         <div>
           <h2 className="text-lg font-semibold mb-1">Liens affiliés</h2>
-          <p className="text-sm text-sub mb-3">URL + prix ¥ par plateforme. Laisser vide pour ne pas créer de lien.</p>
+
+          {/* Section 1 : URL source + générateur */}
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 mb-4">
+            <label className="block">
+              <span className="text-sm font-medium block">URL du produit source ✨</span>
+              <span className="text-xs text-sub block mt-0.5">
+                Taobao, Weidian, 1688 ou Tmall — les liens affiliés seront générés automatiquement
+              </span>
+            </label>
+            <div className="flex gap-2 mt-3">
+              <input
+                type="url"
+                value={sourceUrl}
+                onChange={(e) => setSourceUrl(e.target.value)}
+                placeholder="https://item.taobao.com/item.htm?id=…"
+                className="input flex-1"
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  setGenBusy(true); setGenError(null);
+                  try {
+                    const r = await api.generateLinks(sourceUrl);
+                    setGenResult(r);
+                    // Pré-remplit l'état links avec les URLs générées (sans écraser les prix si déjà saisis)
+                    const newLinks = { ...links };
+                    for (const g of r.links) {
+                      newLinks[g.platform_id] = {
+                        ...(newLinks[g.platform_id] || {}),
+                        url: g.generated_url,
+                        price_cny: newLinks[g.platform_id]?.price_cny ?? '',
+                      };
+                    }
+                    setLinks(newLinks);
+                    toast.success(`${r.links.length} lien(s) généré(s)`);
+                  } catch (err) {
+                    setGenError(err.message);
+                    setGenResult(null);
+                  } finally {
+                    setGenBusy(false);
+                  }
+                }}
+                disabled={genBusy || !sourceUrl.trim()}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold disabled:opacity-50 whitespace-nowrap"
+              >
+                {genBusy ? '⏳ Génération…' : '✨ Générer les liens'}
+              </button>
+            </div>
+
+            {genResult && (
+              <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-emerald-900/40 border border-emerald-800/50 text-sm text-emerald-300">
+                ✓ Plateforme détectée : <strong>{genResult.source.platform}</strong>
+                {' · '}ID : <code className="text-xs">{genResult.source.id}</code>
+              </div>
+            )}
+
+            {genError && (
+              <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-red-900/40 border border-red-800/50 text-sm text-red-300">
+                ✕ {genError}
+              </div>
+            )}
+          </div>
+
+          {/* Section 2 : Liens affichés/éditables */}
+          <p className="text-sm text-sub mb-3">
+            URL + prix ¥ par plateforme. Les URLs générées sont éditables.
+          </p>
           <div className="space-y-2">
             {platforms.map((pl) => {
               const l = links[pl.id] || { url: '', price_cny: '' };
               const filled = !!l.url;
+              const genInfo = genResult?.links.find((g) => g.platform_id === pl.id);
+              const missingAffcode = genInfo && !genInfo.has_affcode;
               return (
                 <div
                   key={pl.id}
-                  className="grid grid-cols-1 sm:grid-cols-[180px_1fr_120px_auto] gap-2 items-center p-3 rounded-lg border border-zinc-800 bg-zinc-900"
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 p-3"
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: pl.color_hex }} />
-                    <span className="font-medium">{pl.name}</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-[180px_1fr_120px_auto] gap-2 items-center">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ background: pl.color_hex }} />
+                      <span className="font-medium">{pl.name}</span>
+                    </div>
+                    <input
+                      type="url"
+                      placeholder={`URL chez ${pl.name}`}
+                      value={l.url || ''}
+                      onChange={(e) => setLink(pl.id, 'url', e.target.value)}
+                      className="input"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Prix ¥"
+                      value={l.price_cny ?? ''}
+                      onChange={(e) => setLink(pl.id, 'price_cny', e.target.value)}
+                      className="input"
+                    />
+                    <span className={`text-xs text-right ${filled ? 'text-emerald-400' : 'text-sub'}`}>
+                      {filled ? 'Renseigné' : 'Vide'}
+                    </span>
                   </div>
-                  <input
-                    type="url"
-                    placeholder={`URL chez ${pl.name}`}
-                    value={l.url || ''}
-                    onChange={(e) => setLink(pl.id, 'url', e.target.value)}
-                    className="input"
-                  />
-                  <input
-                    type="number"
-                    step="0.01"
-                    placeholder="Prix ¥"
-                    value={l.price_cny ?? ''}
-                    onChange={(e) => setLink(pl.id, 'price_cny', e.target.value)}
-                    className="input"
-                  />
-                  <span className={`text-xs text-right ${filled ? 'text-emerald-400' : 'text-sub'}`}>
-                    {filled ? 'Renseigné' : 'Vide'}
-                  </span>
+                  {missingAffcode && (
+                    <div className="mt-2 text-xs text-amber-300 flex items-center gap-2">
+                      ⚠️ Code affilié manquant pour cette plateforme.
+                      <Link to="/admin/platforms" className="underline hover:text-amber-200">
+                        Configurer dans /admin/platforms
+                      </Link>
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
+
+          {/* Section 3 : Mode manuel (info) */}
+          <button
+            type="button"
+            onClick={() => setShowManual((s) => !s)}
+            className="mt-3 text-xs text-sub hover:text-white"
+          >
+            {showManual ? '▾' : '▸'} Mode manuel — saisie directe sans générateur
+          </button>
+          {showManual && (
+            <p className="text-xs text-sub mt-2 leading-relaxed">
+              Les champs ci-dessus sont aussi utilisables directement sans passer par le générateur.
+              Saisis manuellement l'URL et le prix ¥ pour chaque plateforme souhaitée.
+              Utile si l'URL source n'est pas reconnue ou pour un agent custom.
+            </p>
+          )}
         </div>
 
         <div className="flex justify-end gap-2 pt-2">

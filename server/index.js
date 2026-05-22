@@ -52,6 +52,7 @@ const trackRouter = require('./routes/track');
 const analyticsRouter = require('./routes/analytics');
 const exchangeRateRouter = require('./routes/exchangeRate');
 const { productPriceRouter } = require('./routes/exchangeRate');
+const generateLinksRouter = require('./routes/generateLinks');
 
 const app = express();
 app.get('/health', (req, res) => res.json({ ok: true }))
@@ -143,6 +144,7 @@ app.use('/api/admin/social-links', socialAdmin);
 app.use('/api/admin/analytics', analyticsRouter);
 app.use('/api/admin/exchange-rate', exchangeRateRouter);
 app.use('/api/admin/products', productPriceRouter);
+app.use('/api/admin/generate-links', generateLinksRouter);
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

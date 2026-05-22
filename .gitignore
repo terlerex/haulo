@@ -3,6 +3,8 @@ client/dist/
 dist/
 db.sqlite
 db.sqlite-journal
+db.sqlite-wal
+db.sqlite-shm
 .env
 .env.local
 .env.production
