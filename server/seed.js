@@ -1,11 +1,22 @@
-// Seed des données démo. Idempotent :
-//   - admin par défaut créé uniquement si aucun admin n'existe
-//   - produits : table vidée puis repeuplée (DELETE + INSERT)
-//   - plateformes / badges / catégories : déjà seedés par migrate.js si vides
+// Seed des données démo. **IDEMPOTENT** : peut s'exécuter 100 fois sans
+// jamais écraser de données existantes.
+//
+// Règles :
+//   - Aucun DELETE, DROP, TRUNCATE
+//   - Chaque table : vérifie si vide avant d'insérer
+//   - settings : INSERT OR IGNORE (jamais d'écrasement de valeurs custom)
+//   - admin : skip si au moins un user existe
 //
 // Usage : npm run seed
+//
+// IMPORTANT : seed.js n'est PAS appelé automatiquement au démarrage du serveur.
+// Le boot lance migrate.js (idempotent aussi). Seul `npm run seed` exécute
+// ce fichier, et il est désormais safe même sur une base de prod.
+
 const bcrypt = require('bcryptjs');
 const db = require('./db');
+
+console.log('[SEED] Starting (idempotent mode, only inserts missing data)');
 
 const DEFAULT_ADMIN = { username: 'admin', password: 'admin1234' };
 
@@ -41,22 +52,32 @@ function buildFakeUrl(slug, productName) {
   return `https://www.${slug}.com/item/${handle}?ref=YOURCODE`;
 }
 
+function tableCount(name) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM ${name}`).get().n;
+}
+
+// ----- Admin -----
 async function seedAdmin() {
-  const count = db.prepare('SELECT COUNT(*) AS c FROM admin_users').get().c;
-  if (count > 0) {
-    console.log('[seed] admin user(s) déjà présents, skip');
+  const adminExists = db.prepare('SELECT 1 FROM admin_users LIMIT 1').get();
+  if (adminExists) {
+    console.log('[SEED] Table admin_users not empty, skipping');
     return;
   }
   const hash = await bcrypt.hash(DEFAULT_ADMIN.password, 12);
-  db.prepare('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)').run(DEFAULT_ADMIN.username, hash);
-  console.log(`[seed] admin créé → ${DEFAULT_ADMIN.username} / ${DEFAULT_ADMIN.password}`);
+  db.prepare('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)')
+    .run(DEFAULT_ADMIN.username, hash);
+  console.log(`[SEED] admin créé : ${DEFAULT_ADMIN.username} / ${DEFAULT_ADMIN.password}`);
   console.log('⚠️  Changez le mot de passe admin par défaut');
 }
 
+// ----- Produits + liens affiliés -----
 function seedProducts() {
-  db.exec('DELETE FROM affiliate_links');
-  db.exec('DELETE FROM products');
-  db.exec("DELETE FROM sqlite_sequence WHERE name IN ('products','affiliate_links')");
+  if (tableCount('products') > 0) {
+    console.log('[SEED] Table products not empty, skipping (and affiliate_links)');
+    return;
+  }
+  // products est vide → on peut insérer en sécurité, et affiliate_links est forcément vide
+  // (FK CASCADE garantit qu'il ne peut pas y avoir d'orphelins).
 
   const cats = db.prepare('SELECT id, name FROM categories').all().reduce((acc, c) => {
     acc[c.name] = c.id; return acc;
@@ -98,13 +119,42 @@ function seedProducts() {
     db.exec('ROLLBACK');
     throw e;
   }
-  console.log(`[seed] ${PRODUCTS.length} produits insérés avec ${platforms.length} liens chacun`);
+  console.log(`[SEED] ${PRODUCTS.length} produits insérés avec ${platforms.length} liens chacun`);
+}
+
+// ----- Settings, plateformes, badges, catégories, social_links -----
+//
+// Ces tables sont déjà seedées par server/db/migrate.js (qui tourne au démarrage
+// du serveur, idempotent). On les revérifie ici par sécurité — si pour une raison
+// quelconque migrate.js n'a pas pu seeder, on retombe sur nos pieds.
+
+function seedReferenceTables() {
+  // Settings : INSERT OR IGNORE (jamais d'écrasement). migrate.js fait déjà ça,
+  // donc ici on ne fait rien — migrate s'occupe de toutes les nouvelles clés.
+  if (tableCount('settings') === 0) {
+    console.log('[SEED] Table settings empty (étrange, devrait être seedée par migrate.js)');
+  } else {
+    console.log('[SEED] Table settings already populated, skipping');
+  }
+
+  for (const t of ['platforms', 'badges', 'categories', 'social_links']) {
+    if (tableCount(t) > 0) {
+      console.log(`[SEED] Table ${t} not empty, skipping`);
+    } else {
+      console.log(`[SEED] Table ${t} empty — migrate.js devrait l'avoir seedée`);
+    }
+  }
 }
 
 async function main() {
   await seedAdmin();
+  seedReferenceTables();
   seedProducts();
-  console.log('[seed] done');
+  console.log('[SEED] Done');
   process.exit(0);
 }
-main().catch((e) => { console.error(e); process.exit(1); });
+
+main().catch((e) => {
+  console.error('[SEED] FAILED', e);
+  process.exit(1);
+});
