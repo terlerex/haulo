@@ -87,10 +87,20 @@ function seedProducts() {
   }, {});
   const platforms = db.prepare('SELECT id, slug FROM platforms WHERE is_active = 1').all();
 
-  const insertProduct = db.prepare(`
-    INSERT INTO products (name, category_id, price_eur, price_cny, image_url, description, badge_id, is_active)
-    VALUES (@name, @category_id, @price_eur, @price_cny, @image_url, @description, @badge_id, 1)
-  `);
+  // Détecte si l'ancienne colonne `category` TEXT NOT NULL existe encore
+  // (cas DB legacy où DROP COLUMN a silently failed lors d'une vieille migration)
+  const cols = new Set(db.prepare('PRAGMA table_info(products)').all().map((c) => c.name));
+  const hasLegacyCategory = cols.has('category');
+  const hasLegacyBadge = cols.has('badge');
+
+  const fields = ['name', 'category_id', 'price_eur', 'price_cny', 'image_url', 'description', 'badge_id', 'is_active'];
+  const values = ['@name', '@category_id', '@price_eur', '@price_cny', '@image_url', '@description', '@badge_id', '1'];
+  if (hasLegacyCategory) { fields.push('category');  values.push('@category_legacy'); }
+  if (hasLegacyBadge)    { fields.push('badge');     values.push('@badge_legacy'); }
+
+  const insertProduct = db.prepare(
+    `INSERT INTO products (${fields.join(', ')}) VALUES (${values.join(', ')})`
+  );
   const insertLink = db.prepare(`
     INSERT INTO affiliate_links (product_id, platform_id, url, price_cny) VALUES (?, ?, ?, ?)
   `);
@@ -98,7 +108,7 @@ function seedProducts() {
   db.exec('BEGIN');
   try {
     for (const p of PRODUCTS) {
-      const info = insertProduct.run({
+      const params = {
         name: p.name,
         category_id: cats[p.category] ?? null,
         price_eur: p.price_eur,
@@ -106,7 +116,10 @@ function seedProducts() {
         image_url: p.image_url,
         description: p.description,
         badge_id: p.badge_slug ? (badges[p.badge_slug] ?? null) : null,
-      });
+      };
+      if (hasLegacyCategory) params.category_legacy = p.category;
+      if (hasLegacyBadge)    params.badge_legacy = p.badge_slug ?? null;
+      const info = insertProduct.run(params);
       const productId = Number(info.lastInsertRowid);
       for (const pl of platforms) {
         const variance = 0.95 + Math.random() * 0.15;
