@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Portefeuille Pokémon</title>
+<style>
+:root{--ink:#0E1220;--panel:#161C31;--line:#2A3352;--text:#E8ECF7;--muted:#8C97B8;--blue:#6BA8FF;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--ink);color:var(--text);
+  font-family:var(--sans);
+  background-image:radial-gradient(700px 400px at 50% 0%, rgba(107,168,255,.12) 0%, transparent 60%)}
+.card{width:min(360px,100%);background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:26px;position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:linear-gradient(100deg,#7DE2FC,#B36BFF,#FF9BD2,#7DE2FC);background-size:300% 100%;animation:sheen 9s linear infinite}
+@keyframes sheen{to{background-position:300% 0}}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:19px;margin:6px 0 20px;letter-spacing:-.01em}
+label{display:block;margin-bottom:14px}
+.lb{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:6px}
+input{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:11px;color:var(--text);font-size:16px}
+button{width:100%;padding:11px;border-radius:10px;border:1px solid #3E5EA8;background:linear-gradient(180deg,#2E4A8C,#22386C);
+  color:var(--text);font-size:15px;font-family:inherit;cursor:pointer}
+button:disabled{opacity:.6}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.err{color:#FF7A6B;font-size:13px;margin:0 0 12px;min-height:18px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<div class="card">
+  <span class="eyebrow">Accès privé</span>
+  <h1>Portefeuille Pokémon</h1>
+  <p class="err" id="err" role="alert"></p>
+  <label><span class="lb">Mot de passe</span>
+    <input id="pw" type="password" autocomplete="current-password" autofocus></label>
+  <button id="go">Ouvrir</button>
+</div>
+<script>
+const go = document.getElementById("go"), pw = document.getElementById("pw"), err = document.getElementById("err");
+async function login(){
+  err.textContent = ""; go.disabled = true;
+  try{
+    const r = await fetch("/api/login", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({password: pw.value})});
+    if(r.ok){ location.replace("/"); return; }
+    const d = await r.json().catch(()=>({}));
+    err.textContent = d.detail || "Mot de passe incorrect";
+  }catch(e){ err.textContent = "Serveur injoignable"; }
+  go.disabled = false; pw.select();
+}
+go.addEventListener("click", login);
+pw.addEventListener("keydown", e=>{ if(e.key==="Enter") login(); });
+</script>
+</body>
+</html>

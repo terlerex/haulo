@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Portefeuille">
+<title>Portefeuille Pokémon</title>
+<style>
+:root{
+  --ink:#0E1220; --panel:#161C31; --panel2:#1E2540; --line:#2A3352;
+  --text:#E8ECF7; --muted:#8C97B8; --gain:#4ADE9B; --loss:#FF7A6B;
+  --gold:#E8B75A; --blue:#6BA8FF; --violet:#B36BFF;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --r:10px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--ink);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.45;
+  background-attachment:fixed;
+  background-image:radial-gradient(900px 500px at 15% -10%, rgba(107,168,255,.10) 0%, transparent 60%),
+                     radial-gradient(700px 400px at 95% 0%, rgba(179,107,255,.08) 0%, transparent 55%);}
+.wrap{max-width:1180px;margin:0 auto;padding:22px 18px 80px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+button,input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+/* ---- header ---- */
+header.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand h1{font-size:16px;margin:0;letter-spacing:-.01em;font-weight:650}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 12px;border-radius:var(--r);
+  font-size:13px;transition:border-color .15s,background .15s}
+.btn:hover{border-color:#3D4A73;background:#232B49}
+.btn.primary{background:linear-gradient(180deg,#2E4A8C,#22386C);border-color:#3E5EA8}
+.btn.ghost{background:transparent}
+.btn.danger:hover{border-color:var(--loss);color:var(--loss)}
+
+/* ---- hero ---- */
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:16px;overflow:hidden;position:relative}
+.hero::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:linear-gradient(100deg,#7DE2FC,#B36BFF,#FF9BD2,#7DE2FC);background-size:300% 100%;animation:sheen 9s linear infinite}
+@keyframes sheen{to{background-position:300% 0}}
+.hero-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(280px,1.1fr);gap:24px;align-items:end}
+.total{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:clamp(34px,7vw,54px);font-weight:700;line-height:1;
+  letter-spacing:-.03em;margin:6px 0 10px;
+  background:linear-gradient(100deg,#7DE2FC,#B36BFF,#FF9BD2,#7DE2FC);background-size:300% 100%;
+  -webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 9s linear infinite}
+.kpis{display:flex;gap:22px;flex-wrap:wrap}
+.kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600;margin-top:2px}
+.gain{color:var(--gain)} .loss{color:var(--loss)}
+.chart{width:100%;height:120px;display:block}
+.chart-empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--line);border-radius:var(--r);padding:16px;text-align:center}
+
+/* ---- filters ---- */
+.filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:20px 0 10px}
+.chip{background:transparent;border:1px solid var(--line);color:var(--muted);padding:6px 11px;border-radius:999px;font-size:12.5px}
+.chip[aria-pressed="true"]{background:var(--panel2);color:var(--text);border-color:#44548A}
+.search{margin-left:auto;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:7px 13px;min-width:180px}
+
+/* ---- table ---- */
+.rows{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
+.row{display:grid;grid-template-columns:minmax(0,2.4fr) .8fr .5fr .9fr 1fr 1.05fr .9fr;gap:12px;padding:12px 16px;align-items:center;
+  border-top:1px solid var(--line)}
+.row:first-child{border-top:none}
+.row.head{background:var(--panel2);position:sticky;top:0;z-index:2}
+.row.head span{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.row.item{cursor:pointer;transition:background .12s}
+.row.item:hover{background:#1A2138}
+.name{min-width:0}
+.name b{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.name small{color:var(--muted);font-size:11.5px}
+.tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  padding:2px 7px;border-radius:5px;border:1px solid}
+.t-scelle{color:var(--gold);border-color:rgba(232,183,90,.35);background:rgba(232,183,90,.08)}
+.t-loose{color:var(--blue);border-color:rgba(107,168,255,.35);background:rgba(107,168,255,.08)}
+.t-gradee{color:var(--violet);border-color:rgba(179,107,255,.35);background:rgba(179,107,255,.08)}
+.right{text-align:right}
+.dim{color:var(--muted)}
+.pru-flag{font-size:10px;color:var(--muted);font-family:var(--mono)}
+.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--text);margin-bottom:6px;font-size:15px}
+
+/* ---- modal / drawer ---- */
+.backdrop{position:fixed;inset:0;background:rgba(6,9,18,.72);backdrop-filter:blur(3px);z-index:50;display:flex;justify-content:flex-end}
+.sheet{background:var(--panel);border-left:1px solid var(--line);width:min(560px,100%);height:100%;overflow-y:auto;padding:22px}
+.sheet.center{margin:auto;border:1px solid var(--line);border-radius:16px;height:auto;max-height:92vh;width:min(520px,94%)}
+.sheet h2{margin:2px 0 2px;font-size:19px;letter-spacing:-.01em}
+.sheet-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:18px}
+label{display:block;margin-bottom:12px}
+label .lb{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
+input,select,textarea{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+input:hover,select:hover{border-color:#3D4A73}
+.f2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.f3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 12px}
+.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+
+/* ---- estimation block (signature) ---- */
+.est{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}
+.est-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:14px}
+.est-val{font-family:var(--mono);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.conf{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;padding:3px 8px;border-radius:5px;border:1px solid}
+.c-haute{color:var(--gain);border-color:rgba(74,222,155,.4)}
+.c-moyenne{color:var(--gold);border-color:rgba(232,183,90,.4)}
+.c-faible{color:var(--loss);border-color:rgba(255,122,107,.4)}
+.axis{position:relative;height:64px;margin:2px 0 6px}
+.axis .line{position:absolute;left:0;right:0;top:34px;height:1px;background:var(--line)}
+.dot{position:absolute;top:34px;transform:translate(-50%,-50%);border-radius:50%;background:var(--blue);border:1px solid #0E1220}
+.dot.out{background:#3A4468}
+.marker{position:absolute;top:16px;bottom:8px;width:2px;background:var(--gain);transform:translateX(-50%)}
+.marker::after{content:"est.";position:absolute;top:-13px;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:9px;color:var(--gain);letter-spacing:.1em}
+.axis .lbl{position:absolute;top:46px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.comp{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.comp .p{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600}
+.comp.excluded{opacity:.45}
+.w{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.x{background:none;border:none;color:var(--muted);padding:2px 6px;border-radius:6px}
+.x:hover{color:var(--loss);background:rgba(255,122,107,.1)}
+.note{font-size:12.5px;color:var(--muted);margin:10px 0 0}
+.warn{background:rgba(232,183,90,.1);border:1px solid rgba(232,183,90,.35);color:var(--gold);padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
+
+.modes{display:flex;gap:6px;margin:22px 0 0}
+.chip.big{padding:9px 16px;font-size:13.5px;border-radius:10px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:14px;margin:14px 0 0}
+.stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:18px;font-weight:600;margin-top:2px}
+.stat .s{font-size:11.5px;color:var(--muted)}
+.hist{width:100%;height:112px;display:block;margin:6px 0 2px}
+.badge{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;padding:2px 7px;border-radius:5px;border:1px solid;white-space:nowrap}
+.b-up{color:var(--gain);border-color:rgba(74,222,155,.4)}
+.b-down{color:var(--loss);border-color:rgba(255,122,107,.4)}
+.b-flat{color:var(--muted);border-color:var(--line)}
+.row.watch{grid-template-columns:minmax(0,2.4fr) .8fr 1fr 1fr 1fr 1.1fr}
+@media (max-width:860px){
+  .row.watch{grid-template-columns:1fr 1fr}
+  .hero-grid{grid-template-columns:1fr}
+  .row{grid-template-columns:1fr 1fr;gap:4px 12px;padding:14px 14px}
+  .row.head{display:none}
+  .row .name{grid-column:1 / -1}
+  .row .cell::before{content:attr(data-l) " ";font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--muted);display:block}
+  .right{text-align:left}
+  .f3{grid-template-columns:1fr 1fr}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="brand">
+    <h1>Portefeuille Pokémon</h1>
+    <span class="eyebrow" id="stamp">connexion…</span>
+  </div>
+  <div class="toolbar">
+    <button class="btn primary" data-action="new-item">+ Ajouter un item</button>
+    <button class="btn" data-action="snapshot">Enregistrer un point</button>
+    <button class="btn ghost" data-action="settings">Réglages</button>
+    <button class="btn ghost" data-action="export">Exporter</button>
+    <button class="btn ghost" data-action="import">Importer</button>
+    <button class="btn ghost" data-action="logout">Déconnexion</button>
+    <input type="file" id="file" accept="application/json" hidden>
+  </div>
+</header>
+
+<div id="storage-warn"></div>
+
+<section class="hero">
+  <div class="hero-grid">
+    <div>
+      <span class="eyebrow">Valeur estimée du portefeuille</span>
+      <div class="total num" id="total">—</div>
+      <div class="kpis">
+        <div class="kpi"><span class="eyebrow">Investi</span><div class="v num" id="invested">—</div></div>
+        <div class="kpi"><span class="eyebrow">Plus-value</span><div class="v num" id="pnl">—</div></div>
+        <div class="kpi"><span class="eyebrow">Net de frais</span><div class="v num" id="net">—</div></div>
+        <div class="kpi"><span class="eyebrow">Items</span><div class="v num" id="count">—</div></div>
+      </div>
+    </div>
+    <div>
+      <span class="eyebrow">Progression</span>
+      <div id="chart-host"></div>
+    </div>
+  </div>
+</section>
+
+<div class="modes">
+  <button class="chip big" data-mode="owned" aria-pressed="true">Portefeuille</button>
+  <button class="chip big" data-mode="watch" aria-pressed="false">Veille <span id="watch-count"></span></button>
+</div>
+
+<div class="filters">
+  <button class="chip" data-filter="all" aria-pressed="true">Tout</button>
+  <button class="chip" data-filter="scelle" aria-pressed="false">Scellé</button>
+  <button class="chip" data-filter="loose" aria-pressed="false">Loose</button>
+  <button class="chip" data-filter="gradee" aria-pressed="false">Gradée</button>
+  <input class="search" id="search" type="search" placeholder="Rechercher…" aria-label="Rechercher un item">
+</div>
+
+<div class="rows" id="rows"></div>
+
+</div>
+
+<div id="overlay"></div>
+
+<script>
+"use strict";
+
+const TYPES = {scelle:"Scellé", loose:"Loose", gradee:"Gradée"};
+let S = null, filter = "all", query = "", openItem = null, mode = "owned";
+
+/* ---------------- accès API ---------------- */
+async function api(path, opts={}){
+  const o = {headers:{}, credentials:"same-origin", ...opts};
+  if(o.json){ o.method = o.method||"POST"; o.headers["Content-Type"]="application/json";
+    o.body = JSON.stringify(o.json); delete o.json; }
+  const r = await fetch(path, o);
+  if(r.status===401){ location.reload(); throw new Error("401"); }
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || r.statusText);
+  return r.status===204 ? null : r.json();
+}
+async function refresh(){
+  try{
+    S = await api("/api/state");
+    document.getElementById("storage-warn").innerHTML = "";
+    render();
+  }catch(e){
+    if(e.message!=="401") document.getElementById("storage-warn").innerHTML =
+      `<div class="warn">Serveur injoignable. Vérifie qu'il tourne et que l'appareil est sur le même réseau.</div>`;
+  }
+}
+
+/* ---------------- formats ---------------- */
+const eur = n => (n==null||isNaN(n)) ? "—" : new Intl.NumberFormat("fr-FR",{style:"currency",currency:"EUR",maximumFractionDigits:2}).format(n);
+const pct = n => (n==null||isNaN(n)) ? "—" : (n>=0?"+":"") + n.toFixed(1).replace(".",",") + " %";
+const today = () => new Date().toISOString().slice(0,10);
+const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fr = d => new Date(d+"T12:00:00").toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"2-digit"});
+const srcLabel = k => S?.sources?.[k]?.label || k;
+
+/* ---------------- rendu ---------------- */
+function render(){
+  const t = S.totals;
+  document.getElementById("total").textContent = eur(t.value);
+  document.getElementById("invested").textContent = eur(t.invested);
+  document.getElementById("count").textContent = t.units;
+  const p = document.getElementById("pnl");
+  p.textContent = eur(t.pnl) + (t.invested ? ` (${pct(t.pnl/t.invested*100)})` : "");
+  p.className = "v num " + (t.pnl>=0?"gain":"loss");
+  const n = document.getElementById("net");
+  n.textContent = eur(t.net); n.className = "v num " + (t.net>=0?"gain":"loss");
+  document.getElementById("chart-host").innerHTML = chartSVG();
+  document.getElementById("stamp").textContent = S.items.length + " items · synchronisé";
+  renderRows();
+}
+function chartSVG(){
+  const s = S.snapshots;
+  if(s.length<2) return `<div class="chart-empty">Deux points suffisent pour tracer la courbe. Reviens demain, ou clique « Enregistrer un point ».</div>`;
+  const W=520,H=120,P=6;
+  const vals = s.flatMap(p=>[p.value,p.invested]);
+  const lo = Math.min(...vals)*0.97, hi = Math.max(...vals)*1.03 || 1;
+  const x = i => P + i*(W-2*P)/(s.length-1);
+  const y = v => H-P - (v-lo)/((hi-lo)||1)*(H-2*P);
+  const path = k => s.map((p,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).join(" ");
+  const area = path("value") + ` L${x(s.length-1).toFixed(1)},${H-P} L${x(0).toFixed(1)},${H-P} Z`;
+  const diff = s[s.length-1].value - s[0].value;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Évolution du portefeuille">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6BA8FF" stop-opacity=".35"/><stop offset="100%" stop-color="#6BA8FF" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#g)"/>
+    <path d="${path("invested")}" fill="none" stroke="#3A4468" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <path d="${path("value")}" fill="none" stroke="#6BA8FF" stroke-width="2"/>
+    <circle cx="${x(s.length-1).toFixed(1)}" cy="${y(s[s.length-1].value).toFixed(1)}" r="3.5" fill="#7DE2FC"/>
+  </svg>
+  <div class="eyebrow" style="margin-top:6px">${s.length} points · depuis le ${fr(s[0].d)} : <span class="${diff>=0?'gain':'loss'}">${eur(diff)}</span> · tirets = investi</div>`;
+}
+function trendBadge(v, suffix="%"){
+  if(v==null) return `<span class="badge b-flat">—</span>`;
+  const c = v>2 ? "b-up" : v<-2 ? "b-down" : "b-flat";
+  const arrow = v>2 ? "↑" : v<-2 ? "↓" : "→";
+  return `<span class="badge ${c}">${arrow} ${(v>=0?"+":"")}${v.toFixed(1).replace(".",",")}${suffix}</span>`;
+}
+const sales = v => v==null ? "—" : v>=10 ? Math.round(v)+"/mois" : v.toFixed(1).replace(".",",")+"/mois";
+
+function renderRows(){
+  const host = document.getElementById("rows");
+  const pool = S.items.filter(i => (i.status||"owned")===mode);
+  document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
+
+  const list = pool.filter(i =>
+    (filter==="all" || i.type===filter) &&
+    (!query || (i.name+" "+(i.set_name||"")+" "+(i.grade||"")).toLowerCase().includes(query))
+  ).sort((a,b)=> mode==="owned" ? b.value-a.value
+      : ((b.stats.sales_month??-1)-(a.stats.sales_month??-1)));
+
+  if(!pool.length){
+    host.innerHTML = mode==="owned"
+      ? `<div class="empty"><b>Aucun item en portefeuille</b>
+          Ajoute un display, une carte ou une gradée, puis colle tes relevés de prix.
+          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Ajouter un item</button></div></div>`
+      : `<div class="empty"><b>Rien sous surveillance</b>
+          Mets ici ce que tu n'as pas encore acheté. Ajoute des relevés au fil des semaines : tu verras la tendance et le rythme des ventes avant de te décider.
+          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Suivre un item</button></div></div>`;
+    return;
+  }
+  if(!list.length){ host.innerHTML = `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`; return; }
+
+  if(mode==="watch"){
+    const head = `<div class="row watch head"><span>Item</span><span>Type</span><span class="right">Prix estimé</span>
+      <span class="right">Tendance 30j</span><span class="right">Ventes</span><span class="right">Objectif</span></div>`;
+    host.innerHTML = head + list.map(i=>{
+      const st = i.stats;
+      return `<div class="row watch item" data-open="${i.id}" tabindex="0" role="button">
+        <div class="name cell"><b>${esc(i.name)}</b><small>${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+        <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
+        <div class="cell right num" data-l="Prix estimé"><b>${eur(i.est.value)}</b> <span class="pru-flag">${i.est.n}✓</span></div>
+        <div class="cell right" data-l="Tendance 30j">${trendBadge(st.trend30)}</div>
+        <div class="cell right num" data-l="Ventes">${sales(st.sales_month)}</div>
+        <div class="cell right num" data-l="Objectif">${i.target_price ? eur(i.target_price)+" "+(i.gap!=null?`<span class="${i.gap<=0?"gain":"dim"}">${pct(i.gap)}</span>`:"") : '<span class="dim">—</span>'}</div>
+      </div>`;
+    }).join("");
+    return;
+  }
+
+  const head = `<div class="row head"><span>Item</span><span>Type</span><span class="right">Qté</span>
+    <span class="right">PRU</span><span class="right">Est. / u</span><span class="right">Valeur</span><span class="right">±</span></div>`;
+  host.innerHTML = head + list.map(i=>{
+    const d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
+    return `<div class="row item" data-open="${i.id}" tabindex="0" role="button">
+      <div class="name cell"><b>${esc(i.name)}</b><small>${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+      <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
+      <div class="cell right num" data-l="Qté">${i.qty}</div>
+      <div class="cell right num dim" data-l="PRU">${eur(i.buy_price)}</div>
+      <div class="cell right num" data-l="Est./u">${eur(i.est.value)} ${i.est.fallback?'<span class="pru-flag">PRU</span>':`<span class="pru-flag">${i.est.n}✓</span>`}</div>
+      <div class="cell right num" data-l="Valeur"><b>${eur(i.value)}</b></div>
+      <div class="cell right num ${d==null?"dim":d>=0?"gain":"loss"}" data-l="±">${pct(d)}</div>
+    </div>`;
+  }).join("");
+}
+
+/* ---------------- panneaux ---------------- */
+function historyChart(item){
+  const pts = item.est.points.filter(p=>p.price>0);
+  if(pts.length<2) return "";
+  const W=480,H=112,PL=4,PT=10,PB=16;
+  const maxAge = Math.max(...pts.map(p=>daysAgo(p.date)), 1);
+  const vals = pts.map(p=>p.price).concat(item.target_price?[item.target_price]:[]);
+  const lo = Math.min(...vals)*0.96, hi = Math.max(...vals)*1.04 || 1;
+  const x = age => W-PL - (age/maxAge)*(W-2*PL);
+  const y = v => H-PB - (v-lo)/((hi-lo)||1)*(H-PT-PB);
+  const fit = item.stats.fit;
+  const trend = fit ? `<line x1="${x(maxAge).toFixed(1)}" y1="${y(fit.now + fit.slope*(-maxAge)).toFixed(1)}"
+      x2="${x(0).toFixed(1)}" y2="${y(fit.now).toFixed(1)}" stroke="#6BA8FF" stroke-width="1.5" opacity=".8"/>` : "";
+  const target = item.target_price ? `<line x1="0" y1="${y(item.target_price).toFixed(1)}" x2="${W}" y2="${y(item.target_price).toFixed(1)}"
+      stroke="#E8B75A" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>` : "";
+  return `<svg class="hist" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Historique des relevés de prix">
+    ${target}${trend}
+    ${pts.map(p=>`<circle cx="${x(daysAgo(p.date)).toFixed(1)}" cy="${y(p.price).toFixed(1)}" r="${3+Math.min(3,((p.sold_count||1)-1)*0.6)}"
+      fill="${p.out||p.excluded?"#3A4468":"#7DE2FC"}"/>`).join("")}
+  </svg>
+  <div class="eyebrow" style="display:flex;justify-content:space-between">
+    <span>il y a ${Math.round(maxAge)} j</span>${item.target_price?'<span style="color:var(--gold)">— — objectif</span>':""}<span>aujourd'hui</span></div>`;
+}
+const daysAgo = d => Math.max(0,(Date.now()-new Date(d+"T12:00:00").getTime())/864e5);
+
+function statsBlock(item){
+  const st = item.stats;
+  const cell = (lb, val, sub) => `<div class="stat"><span class="eyebrow">${lb}</span><div class="v">${val}</div>
+    ${sub?`<div class="s">${sub}</div>`:""}</div>`;
+  return `<div class="stats">
+    ${cell("Tendance 30j", trendBadge(st.trend30), st.trend30==null?"pas assez de recul":"vs les 60 j précédents")}
+    ${cell("Rythme", trendBadge(st.slope_pct), st.slope_pct==null?"série trop courte":"pente sur 180 j")}
+    ${cell("Ça part ?", sales(st.sales_month), st.sales_90?`${st.sales_90} ventes relevées sur 90 j`:"aucune vente relevée")}
+    ${cell("Dispersion", st.spread==null?"—":Math.round(st.spread)+" %", st.low90!=null?`${eur(st.low90)} → ${eur(st.high90)}`:"")}
+  </div>`;
+}
+
+function openSheet(html, cls){
+  document.getElementById("overlay").innerHTML =
+    `<div class="backdrop" data-close><div class="sheet ${cls||""}">${html}</div></div>`;
+  const f = document.querySelector(".sheet input, .sheet select, .sheet button");
+  if(f) f.focus();
+}
+function closeSheet(){ document.getElementById("overlay").innerHTML=""; openItem=null; }
+
+function itemSheet(id){
+  const i = S.items.find(x=>x.id===id); if(!i) return;
+  openItem = id;
+  const e = i.est, d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
+  const watch = (i.status||"owned")==="watch";
+  const pts = e.points;
+  const ps = pts.map(x=>x.price);
+  const lo = Math.min(...ps, e.value ?? Infinity), hi = Math.max(...ps, e.value ?? 0);
+  const posOf = p => hi>lo ? ((p-lo)/(hi-lo))*94+3 : 50;
+  const maxW = Math.max(...pts.map(x=>x.weight||0), 0.001);
+
+  const axis = pts.length ? `
+    <div class="axis"><div class="line"></div>
+      ${pts.map(x=>{const r=6+10*((x.weight||0)/maxW);
+        return `<div class="dot ${x.out||x.excluded?"out":""}" style="left:${posOf(x.price)}%;width:${r}px;height:${r}px" title="${eur(x.price)}"></div>`}).join("")}
+      ${e.value!=null&&!e.fallback?`<div class="marker" style="left:${posOf(e.value)}%"></div>`:""}
+      <div class="lbl" style="left:0">${eur(lo)}</div><div class="lbl" style="right:0">${eur(hi)}</div>
+    </div>` : `<p class="note">Aucun relevé pour l'instant : la valeur affichée est ton prix d'achat.</p>`;
+
+  const comps = [...pts].sort((a,b)=>a.date<b.date?1:-1).map(c=>`
+    <div class="comp ${c.excluded||c.out?"excluded":""}">
+      <span class="p">${eur(c.price)}</span>
+      <span>${esc(srcLabel(c.source))} <span class="dim">· ${fr(c.date)}</span>${c.note?` <span class="dim">· ${esc(c.note)}</span>`:""}${c.out?' <span class="dim">· écarté (aberrant)</span>':""}</span>
+      <span class="w">${c.excluded?"ignoré":"poids "+(c.weight||0).toFixed(2)}</span>
+      <span><button class="x" data-toggle-comp="${c.id}" title="Ignorer / réintégrer">${c.excluded?"↺":"⦸"}</button><button class="x" data-del-comp="${c.id}" title="Supprimer">✕</button></span>
+    </div>`).join("") || `<p class="note">Ajoute une vente eBay conclue, un prix tendance Cardmarket, une vente d'un groupe… chaque ligne pèse selon sa source et sa fraîcheur.</p>`;
+
+  openSheet(`
+    <div class="sheet-head">
+      <div><span class="eyebrow">${watch?"En veille · ":""}${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
+        <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span></div>
+      <button class="btn ghost" data-close-btn>Fermer</button>
+    </div>
+    <div class="est">
+      <div class="est-top">
+        <div><span class="eyebrow">Prix de vente moyen estimé</span>
+          <div class="est-val">${eur(e.value)}${e.fallback?' <span class="pru-flag">= prix d\'achat</span>':""}</div></div>
+        <span class="conf c-${e.conf}">Fiabilité ${e.conf}</span>
+      </div>
+      ${axis}
+      <div class="eyebrow" style="margin-top:10px">Comment on arrive à ce prix</div>
+      <p class="note">Moyenne pondérée de ${e.n} relevé${e.n>1?"s":""} : chaque prix compte selon sa source et perd la moitié de son poids tous les ${S.settings.halfLife} jours. Les valeurs aberrantes sont écartées automatiquement.</p>
+    </div>
+    ${historyChart(i)}
+    ${statsBlock(i)}
+    <hr class="sep">
+    ${watch ? `<div class="f3">
+      <div><span class="eyebrow">Objectif d'achat</span><div class="num" style="font-size:17px">${i.target_price?eur(i.target_price):"—"}</div></div>
+      <div><span class="eyebrow">Écart au marché</span><div class="num ${i.gap!=null&&i.gap<=0?"gain":"dim"}" style="font-size:17px">${i.gap!=null?pct(i.gap):"—"}</div></div>
+      <div><span class="eyebrow">Historique</span><div class="num" style="font-size:17px">${i.stats.span} j</div></div>
+    </div>` : `<div class="f3">
+      <div><span class="eyebrow">Quantité</span><div class="num" style="font-size:17px">${i.qty}</div></div>
+      <div><span class="eyebrow">Investi</span><div class="num" style="font-size:17px">${eur(i.cost)}</div></div>
+      <div><span class="eyebrow">Plus-value</span><div class="num ${d>=0?"gain":"loss"}" style="font-size:17px">${eur(i.value-i.cost)} · ${pct(d)}</div></div>
+    </div>`}
+    ${i.notes?`<p class="note">${esc(i.notes)}</p>`:""}
+    <hr class="sep">
+    <span class="eyebrow">Relevés de prix (${pts.length})</span>
+    <div style="margin:8px 0 14px">${comps}</div>
+    <div class="f3">
+      <label><span class="lb">Prix</span><input id="c-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0,00"></label>
+      <label><span class="lb">Date</span><input id="c-date" type="date" value="${today()}"></label>
+      <label><span class="lb">Source</span><select id="c-source">${Object.entries(S.sources).map(([k,s])=>`<option value="${k}">${esc(s.label)}</option>`).join("")}</select></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Nb de ventes</span><input id="c-count" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
+      <label><span class="lb">Note (état, lot, vendeur…)</span><input id="c-note" placeholder="facultatif"></label>
+    </div>
+    <p class="note">Un relevé peut résumer plusieurs ventes : « 9 ventes eBay autour de 104 € cette semaine » → prix 104, nb de ventes 9. C'est ce qui alimente le rythme de vente.</p>
+    <div class="actions">
+      <button class="btn danger ghost" data-del-item="${i.id}">Supprimer</button>
+      <button class="btn" data-edit-item="${i.id}">Modifier</button>
+      ${watch ? `<button class="btn" data-buy="${i.id}">Je l'ai acheté</button>`
+              : `<button class="btn ghost" data-unbuy="${i.id}">Remettre en veille</button>`}
+      <button class="btn primary" data-add-comp="${i.id}">Ajouter le relevé</button>
+    </div>`);
+}
+
+function itemForm(id){
+  const i = id ? S.items.find(x=>x.id===id) : null;
+  const st = i ? (i.status||"owned") : mode;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">${i?"Modifier":"Nouvel item"}</span>
+      <h2>${i?esc(i.name):"Ajouter au portefeuille"}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <label><span class="lb">Nom</span><input id="f-name" value="${esc(i?.name||"")}" placeholder="Display Évolutions Prismatiques"></label>
+    <div class="f3">
+      <label><span class="lb">Type</span><select id="f-type">${Object.entries(TYPES).map(([k,l])=>`<option value="${k}" ${i?.type===k?"selected":""}>${l}</option>`).join("")}</select></label>
+      <label><span class="lb">Langue</span><select id="f-lang">${["FR","EN","JP","Autre"].map(l=>`<option ${i?.lang===l?"selected":""}>${l}</option>`).join("")}</select></label>
+      <label><span class="lb">Grade</span><input id="f-grade" value="${esc(i?.grade||"")}" placeholder="PSA 10"></label>
+    </div>
+    <label><span class="lb">Série / set</span><input id="f-set" value="${esc(i?.set_name||"")}" placeholder="EV02 · 151 · Destinées de Paldea"></label>
+    <label><span class="lb">Statut</span><select id="f-status">
+      <option value="owned" ${st==="owned"?"selected":""}>En portefeuille — je l'ai acheté</option>
+      <option value="watch" ${st==="watch"?"selected":""}>En veille — je surveille le prix</option>
+    </select></label>
+    <div class="f3">
+      <label><span class="lb">Quantité</span><input id="f-qty" type="number" inputmode="numeric" min="1" step="1" value="${i?.qty||1}"></label>
+      <label><span class="lb">Prix d'achat / u</span><input id="f-buy" type="number" inputmode="decimal" step="0.01" min="0" value="${i?.buy_price??""}"></label>
+      <label><span class="lb">Date d'achat</span><input id="f-date" type="date" value="${i?.buy_date||today()}"></label>
+    </div>
+    <label><span class="lb">Objectif d'achat (veille)</span><input id="f-target" type="number" inputmode="decimal" step="0.01" min="0"
+      value="${i?.target_price||""}" placeholder="le prix auquel tu serais acheteur"></label>
+    <label><span class="lb">Notes</span><textarea id="f-notes" rows="2" placeholder="Où acheté, état du carton, objectif de revente…">${esc(i?.notes||"")}</textarea></label>
+    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-save-item="${i?.id||"new"}">${i?"Enregistrer":"Ajouter"}</button></div>
+  `,"center");
+}
+
+function buyForm(id){
+  const i = S.items.find(x=>x.id===id);
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Passage en portefeuille</span><h2>${esc(i.name)}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note" style="margin-bottom:14px">Les relevés déjà accumulés sont conservés : ton historique de prix continue.</p>
+    <div class="f3">
+      <label><span class="lb">Prix payé / u</span><input id="b-price" type="number" inputmode="decimal" step="0.01" min="0"
+        value="${i.target_price||""}"></label>
+      <label><span class="lb">Quantité</span><input id="b-qty" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
+      <label><span class="lb">Date</span><input id="b-date" type="date" value="${today()}"></label>
+    </div>
+    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-save-buy="${id}">Ajouter au portefeuille</button></div>
+  `,"center");
+}
+
+function settingsForm(){
+  const s = S.settings;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Réglages</span><h2>Calcul de l'estimation</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="f2">
+      <label><span class="lb">Demi-vie d'un relevé (jours)</span><input id="s-hl" type="number" min="7" value="${s.halfLife}"></label>
+      <label><span class="lb">Frais de vente (%)</span><input id="s-fee" type="number" min="0" step="0.5" value="${s.fees}"></label>
+    </div>
+    <label><span class="lb">Sensibilité aux valeurs aberrantes (k)</span><input id="s-k" type="number" min="1" step="0.5" value="${s.trimK}"></label>
+    <p class="note">k bas = écarte plus de prix extrêmes. À 3, seuls les vrais accidents sortent.</p>
+    <hr class="sep">
+    <span class="eyebrow">Poids par source</span>
+    <div class="f2" style="margin-top:8px">
+      ${Object.entries(S.sources).map(([k,src])=>`<label><span class="lb">${esc(src.label)}</span>
+        <input data-w="${k}" type="number" min="0" max="1" step="0.05" value="${s.weights[k]}"></label>`).join("")}
+    </div>
+    <div class="actions"><button class="btn primary" data-save-settings>Enregistrer</button></div>
+  `,"center");
+}
+
+/* ---------------- actions ---------------- */
+document.addEventListener("click", async ev=>{
+  const t = ev.target;
+  try{
+    const act = t.closest("[data-action]")?.dataset.action;
+    if(act==="new-item") return itemForm(null);
+    if(act==="settings") return settingsForm();
+    if(act==="snapshot"){ await api("/api/snapshot",{method:"POST"}); return refresh(); }
+    if(act==="export"){
+      const data = await api("/api/export");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+      a.download = `portefeuille-pokemon-${today()}.json`; a.click(); URL.revokeObjectURL(a.href); return;
+    }
+    if(act==="import") return document.getElementById("file").click();
+
+    if(act==="logout"){ await api("/api/logout",{method:"POST"}); return location.reload(); }
+    if(t.closest("[data-close-btn]") || t.hasAttribute("data-close")) return closeSheet();
+
+    const open = t.closest("[data-open]");
+    if(open) return itemSheet(open.dataset.open);
+
+    const si = t.closest("[data-save-item]");
+    if(si){
+      const g = x => document.getElementById(x).value.trim();
+      if(!g("f-name")) return document.getElementById("f-name").focus();
+      const body = {name:g("f-name"), type:g("f-type"), lang:g("f-lang"), grade:g("f-grade"),
+        set_name:g("f-set"), qty:g("f-qty"), buy_price:g("f-buy"), buy_date:g("f-date"), notes:g("f-notes"),
+        status:g("f-status"), target_price:g("f-target")};
+      const id = si.dataset.saveItem;
+      await api(id==="new" ? "/api/items" : "/api/items/"+id, {json:body, method: id==="new"?"POST":"PUT"});
+      closeSheet(); return refresh();
+    }
+    const ed = t.closest("[data-edit-item]"); if(ed) return itemForm(ed.dataset.editItem);
+
+    const bu = t.closest("[data-buy]"); if(bu) return buyForm(bu.dataset.buy);
+    const sb = t.closest("[data-save-buy]");
+    if(sb){
+      await api(`/api/items/${sb.dataset.saveBuy}/buy`, {json:{buy_price:document.getElementById("b-price").value,
+        qty:document.getElementById("b-qty").value, buy_date:document.getElementById("b-date").value}});
+      closeSheet(); mode = "owned";
+      document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c.dataset.mode==="owned"));
+      return refresh();
+    }
+    const ub = t.closest("[data-unbuy]");
+    if(ub){ await api(`/api/items/${ub.dataset.unbuy}/watch`,{method:"POST"}); closeSheet(); return refresh(); }
+
+    const di = t.closest("[data-del-item]");
+    if(di){
+      if(!confirm("Supprimer cet item et ses relevés ?")) return;
+      await api("/api/items/"+di.dataset.delItem,{method:"DELETE"}); closeSheet(); return refresh();
+    }
+    const ac = t.closest("[data-add-comp]");
+    if(ac){
+      const price = document.getElementById("c-price").value;
+      if(!(parseFloat(price)>0)) return document.getElementById("c-price").focus();
+      await api(`/api/items/${ac.dataset.addComp}/comps`, {json:{price, date:document.getElementById("c-date").value,
+        source:document.getElementById("c-source").value, note:document.getElementById("c-note").value.trim(),
+        sold_count:document.getElementById("c-count").value}});
+      await refresh(); return itemSheet(ac.dataset.addComp);
+    }
+    const tg = t.closest("[data-toggle-comp]");
+    if(tg){ await api("/api/comps/"+tg.dataset.toggleComp,{method:"PATCH"}); const k=openItem; await refresh(); return itemSheet(k); }
+
+    const dc = t.closest("[data-del-comp]");
+    if(dc){ await api("/api/comps/"+dc.dataset.delComp,{method:"DELETE"}); const k=openItem; await refresh(); return itemSheet(k); }
+
+    if(t.closest("[data-save-settings]")){
+      const weights = {};
+      document.querySelectorAll("[data-w]").forEach(el=> weights[el.dataset.w] = el.value);
+      await api("/api/settings",{method:"PUT", json:{halfLife:document.getElementById("s-hl").value,
+        fees:document.getElementById("s-fee").value, trimK:document.getElementById("s-k").value, weights}});
+      closeSheet(); return refresh();
+    }
+    const mchip = t.closest("[data-mode]");
+    if(mchip){
+      mode = mchip.dataset.mode;
+      document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c===mchip));
+      return renderRows();
+    }
+    const chip = t.closest("[data-filter]");
+    if(chip){
+      filter = chip.dataset.filter;
+      document.querySelectorAll("[data-filter]").forEach(c=>c.setAttribute("aria-pressed", c===chip));
+      renderRows();
+    }
+  }catch(err){ if(err.message!=="401") alert("Échec : "+err.message); }
+});
+
+document.addEventListener("keydown", e=>{
+  if(e.key==="Escape") closeSheet();
+  if(e.key==="Enter" && e.target.closest(".sheet") && e.target.tagName==="INPUT"){
+    const b = document.querySelector(".sheet .btn.primary"); if(b) b.click();
+  }
+  const row = e.target.closest("[data-open]");
+  if(row && (e.key==="Enter"||e.key===" ")){ e.preventDefault(); itemSheet(row.dataset.open); }
+});
+document.getElementById("search").addEventListener("input", e=>{ query = e.target.value.toLowerCase().trim(); if(S) renderRows(); });
+document.getElementById("file").addEventListener("change", async e=>{
+  const f = e.target.files[0]; if(!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try{
+    if(!confirm("L'import remplace le contenu actuel de la base. Continuer ?")) return;
+    await api("/api/import",{method:"POST", body:fd}); await refresh();
+  }catch(err){ alert("Import impossible : "+err.message); }
+  finally{ e.target.value=""; }
+});
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden && !document.querySelector(".sheet")) refresh(); });
+
+refresh();
+</script>
+
+</body>
+</html>

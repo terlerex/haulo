@@ -1,86 +1,129 @@
-# RepFind
+# Portefeuille Pokémon
 
-Application d'affiliation pour produits importés de Chine. Catalogue public + interface admin, agents/plateformes pré-configurés.
+Suivi perso de collection Pokémon TCG : scellé, cartes loose et gradées, estimation du prix de revente à partir de tes propres relevés, progression du portefeuille.
 
-## Stack
-- Frontend : React + Vite + React Router v6, Tailwind CSS v3
-- Backend : Express.js (**Node 22.5+ requis** — utilise le module natif `node:sqlite`)
-- DB : SQLite via `node:sqlite` (intégré à Node, zéro compilation), fichier `db.sqlite` à la racine
+Accessible depuis n'importe quel appareil, protégé par mot de passe.
 
-## Installation
+---
 
-```bash
-npm install        # installe root + server + client
-cp .env.example .env
-npm run seed       # peuple la DB avec 6 produits + 8 plateformes
-npm run dev        # client sur :5173, server sur :3001
+## Deux onglets
+
+**Portefeuille** — ce que tu possèdes. Valeur estimée, plus-value, net de frais, courbe de progression.
+
+**Veille** — ce que tu n'as pas encore acheté. Même moteur d'estimation, mais l'item ne pèse pas dans le bilan. Tu y suis :
+
+| Indicateur | Ce qu'il dit |
+|---|---|
+| **Tendance 30j** | médiane des 30 derniers jours contre celle des 60 jours précédents |
+| **Rythme** | pente de régression sur 180 jours, en % par mois — la direction de fond |
+| **Ça part ?** | ventes constatées par mois, à partir des relevés issus d'une vraie transaction (eBay vendu, vente Cardmarket, GCC) |
+| **Dispersion** | écart entre le plus bas et le plus haut sur 90 jours — un marché large est un marché où le prix se négocie |
+| **Objectif** | le prix auquel tu serais acheteur, et l'écart du marché à cet objectif |
+
+Le graphique de la fiche montre tous tes relevés dans le temps, la droite de tendance, et ton objectif en pointillés dorés.
+
+### Le champ « nb de ventes »
+
+Un relevé peut résumer plusieurs transactions : « 9 ventes eBay autour de 104 € cette semaine » → prix `104`, nb de ventes `9`. C'est ce qui alimente le rythme de vente. Un relevé de prix affiché (annonce Cardmarket, tendance) ne compte pas comme une vente.
+
+Quand tu achètes : bouton **Je l'ai acheté**, prix payé et quantité, l'item bascule au portefeuille en gardant tout son historique de prix.
+
+Ces indicateurs décrivent ce que tes relevés contiennent, rien de plus. Une tendance calculée sur trois relevés d'un même vendeur ne vaut pas grand-chose — la colonne « historique » et le nombre de relevés sont là pour te le rappeler.
+
+---
+
+## Mettre en ligne sur ton nom de domaine (Railway)
+
+### 1. Le code sur GitHub
+
+```
+git init && git add . && git commit -m "portefeuille pokemon"
+gh repo create portefeuille-pokemon --private --source=. --push
 ```
 
-L'app Vite proxifie `/api` vers le serveur Express en dev.
+Dépôt **privé** : inutile d'exposer la config.
 
-## Scripts
+### 2. Le service Railway
 
-- `npm run dev` — lance client + server en parallèle
-- `npm run build` — build du client dans `client/dist`
-- `npm start` — démarre Express en prod (sert le dist)
-- `npm run seed` — réinitialise la DB avec les données de démo
+New Project → Deploy from GitHub repo → ce dépôt. Le `Dockerfile` est détecté automatiquement.
 
-## Structure
+### 3. Le volume (l'étape à ne pas rater)
+
+Sur le service : **Variables → Volumes → New Volume**, point de montage `/data`.
+
+Sans volume, la base est effacée à chaque redéploiement. Avec, elle survit à tout.
+
+### 4. Les variables d'environnement
+
+| Variable | Valeur |
+|---|---|
+| `PORTFOLIO_PASSWORD` | ton mot de passe (obligatoire, le site est public) |
+| `DB_PATH` | `/data/portfolio.db` |
+| `PORT` | `8000` |
+| `SESSION_DAYS` | `90` (optionnel — durée avant de redemander le mot de passe) |
+
+### 5. Le domaine
+
+Service → Settings → Networking → **+ Custom Domain** → `pokemon.tondomaine.fr`.
+
+Railway affiche **deux** enregistrements à créer chez ton registrar : un `CNAME` et un `TXT`. Les deux sont obligatoires — sans le TXT, le domaine renvoie 404 même quand le CNAME résout. HTTPS automatique ensuite.
+
+Détail du pas à pas : `TUTO-RAILWAY.md`.
+
+### 6. Tes données
+
+Ouvre le site, connecte-toi, bouton **Importer**, choisis l'export JSON de la version locale. Tout est repris : items, relevés, historique, réglages.
+
+Sur le téléphone : Partager → **Sur l'écran d'accueil**. L'app s'ouvre en plein écran et la session tient 90 jours — mot de passe une fois, plus jamais ensuite.
+
+---
+
+## La protection
+
+- Page de connexion sur **toute** l'application : sans session valide, aucune page ni aucune route API ne répond.
+- Session = cookie signé HMAC-SHA256, `HttpOnly` + `Secure` en HTTPS. La clé de signature est générée une fois et stockée dans la base, donc un redéploiement ne te déconnecte pas.
+- 5 essais ratés par IP et par quart d'heure, ensuite `429`.
+- Mot de passe comparé en temps constant, jamais stocké en base : il ne vit que dans la variable d'environnement.
+
+Prends un mot de passe long et unique. C'est la seule chose entre l'inventaire de ta collection et le premier venu.
+
+---
+
+## En local
 
 ```
-/server         Express API + better-sqlite3
-/client         Vite + React
-db.sqlite       Base SQLite (gitignore)
+./start.sh          # macOS / Linux
+start.bat           # Windows
 ```
 
-## Routes API (préfixe `/api`)
+Sans `PORTFOLIO_PASSWORD`, l'accès est libre — acceptable sur ton réseau, jamais en ligne. La base est `portfolio.db` à côté de `app.py`.
 
-- `GET    /api/products?category=&search=&limit=&offset=`
-- `GET    /api/products/:id`
-- `POST   /api/products`
-- `PUT    /api/products/:id`
-- `DELETE /api/products/:id` (soft delete)
-- `POST   /api/products/:id/links` (upsert)
-- `DELETE /api/products/:id/links/:lid`
-- `GET    /api/platforms`
-- `PUT    /api/platforms/:id`
-- `GET    /api/stats`
+Pour tester la version protégée en local :
 
-## Routes frontend
-
-- `/` — catalogue public
-- `/product/:id` — détail produit
-- `/admin` — dashboard
-- `/admin/products` — liste produits
-- `/admin/products/new` — ajout
-- `/admin/products/:id/edit` — édition (avec gestion liens affiliés)
-- `/admin/platforms` — gestion plateformes
-
-## Déploiement Railway
-
-Railway build le client puis lance Express qui sert `client/dist`. Un seul service.
-
-1. Crée un projet Railway, connecte le repo.
-2. Variables d'env : `PORT` (auto), `NODE_ENV=production`.
-3. Build command : `npm install && npm run build`
-4. Start command : `npm start`
-
-### Passage SQLite → Postgres
-
-Pour la persistance sur Railway/Vercel, remplacer better-sqlite3 par `pg` :
-
-```bash
-npm install pg --prefix server
+```
+PORTFOLIO_PASSWORD=test uvicorn app:app --port 8000
 ```
 
-Dans `server/db.js`, branche conditionnelle sur `process.env.DATABASE_URL` : si défini, on utilise un pool `pg` ; sinon SQLite local. Voir le commentaire en haut de `server/index.js` pour le détail des adaptations SQL (placeholders `$1` au lieu de `?`, `SERIAL` au lieu de `INTEGER PRIMARY KEY AUTOINCREMENT`).
+---
 
-## Déploiement Vercel
+## Sauvegarde
 
-Vercel est moins naturel pour Express + SQLite (filesystem éphémère). Utiliser Railway ou Render pour la DB persistante, ou migrer en Postgres managé (Neon/Supabase) puis Vercel pour le frontend uniquement.
+Le bouton **Exporter** produit un JSON complet. Sur Railway, prends l'habitude de l'enregistrer de temps en temps : un volume, ça reste un seul endroit.
 
-## TODO
+---
 
-- Authentification admin (basic auth ou JWT)
-- Upload d'images locales (cloudinary ou S3)
-- Migration Postgres en option via `DATABASE_URL`
+## API
+
+Doc interactive sur `/docs` (protégée elle aussi).
+
+| Endpoint | Rôle |
+|---|---|
+| `POST /api/login` · `POST /api/logout` | session |
+| `GET /api/state` | items + estimations + totaux + historique |
+| `POST/PUT/DELETE /api/items` | gestion des items |
+| `POST /api/items/{id}/comps` | ajouter un relevé de prix |
+| `PATCH /api/comps/{id}` | ignorer / réintégrer un relevé |
+| `PUT /api/settings` | demi-vie, frais, poids des sources |
+| `GET /api/export` · `POST /api/import` | sauvegarde JSON |
+
+Utile si tu veux plus tard alimenter les relevés depuis un script Python plutôt qu'à la main.
