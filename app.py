@@ -107,6 +107,10 @@ def migrate(con: sqlite3.Connection) -> None:
         },
         "comps": {
             "sold_count": "INTEGER NOT NULL DEFAULT 1",  # nb de ventes que ce relevé représente
+            # Port séparé du prix article. Règle stricte : l'estimation de valeur
+            # se calcule sur `price` seul (mélanger port inclus / exclu fausserait
+            # la moyenne). Le coût total = price + shipping est calculé côté build_state.
+            "shipping": "REAL NOT NULL DEFAULT 0",
         },
     }
     for table, cols in add.items():
@@ -319,6 +323,10 @@ def load_items() -> list[dict]:
     by_item: dict[str, list] = {}
     for c in comps:
         c["excluded"] = bool(c["excluded"])
+        c["shipping"] = float(c.get("shipping") or 0)
+        # Coût total (article + port) : sert à évaluer une opportunité d'achat.
+        # N'est PAS utilisé par estimate() qui reste sur price seul.
+        c["total"] = float(c["price"]) + c["shipping"]
         by_item.setdefault(c["item_id"], []).append(c)
     for it in items:
         it["comps"] = by_item.get(it["id"], [])
@@ -479,16 +487,18 @@ def api_add_comp(iid: str, p: dict = Body(...)):
     price = float(p.get("price") or 0)
     if price <= 0:
         raise HTTPException(400, "prix invalide")
+    shipping = max(0.0, float(p.get("shipping") or 0))
     cid = nid()
     with db() as con:
         if not con.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone():
             raise HTTPException(404, "item introuvable")
         con.execute(
-            "INSERT INTO comps(id,item_id,price,date,source,note,excluded,sold_count) "
-            "VALUES(?,?,?,?,?,?,0,?)",
+            "INSERT INTO comps(id,item_id,price,date,source,note,excluded,sold_count,shipping) "
+            "VALUES(?,?,?,?,?,?,0,?,?)",
             (cid, iid, price, str(p.get("date") or date.today().isoformat())[:10],
              p.get("source") if p.get("source") in SOURCES else "manual",
-             str(p.get("note", ""))[:200], max(1, int(p.get("sold_count") or 1))),
+             str(p.get("note", ""))[:200], max(1, int(p.get("sold_count") or 1)),
+             shipping),
         )
     return {"id": cid}
 
@@ -497,6 +507,28 @@ def api_add_comp(iid: str, p: dict = Body(...)):
 def api_toggle_comp(cid: str):
     with db() as con:
         con.execute("UPDATE comps SET excluded = 1 - excluded WHERE id=?", (cid,))
+    return {"ok": True}
+
+
+@app.put("/api/comps/{cid}")
+def api_edit_comp(cid: str, p: dict = Body(...)):
+    """Édite un relevé (prix / port / note / source / date / nb ventes)."""
+    price = float(p.get("price") or 0)
+    if price <= 0:
+        raise HTTPException(400, "prix invalide")
+    with db() as con:
+        cur = con.execute(
+            "UPDATE comps SET price=?, shipping=?, date=?, source=?, note=?, sold_count=? WHERE id=?",
+            (price,
+             max(0.0, float(p.get("shipping") or 0)),
+             str(p.get("date") or date.today().isoformat())[:10],
+             p.get("source") if p.get("source") in SOURCES else "manual",
+             str(p.get("note", ""))[:200],
+             max(1, int(p.get("sold_count") or 1)),
+             cid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "relevé introuvable")
     return {"ok": True}
 
 
@@ -578,13 +610,14 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             )
             for c in it.get("comps") or []:
                 con.execute(
-                    "INSERT OR REPLACE INTO comps(id,item_id,price,date,source,note,excluded,sold_count) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO comps(id,item_id,price,date,source,note,excluded,sold_count,shipping) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (str(c.get("id") or nid()), iid, float(c.get("price") or 0),
                      str(c.get("date") or date.today().isoformat())[:10],
                      c.get("source") if c.get("source") in SOURCES else "manual",
                      str(c.get("note", ""))[:200], int(bool(c.get("excluded"))),
-                     max(1, int(c.get("sold_count") or 1))),
+                     max(1, int(c.get("sold_count") or 1)),
+                     max(0.0, float(c.get("shipping") or 0))),
                 )
         for s in data.get("snapshots") or []:
             con.execute(

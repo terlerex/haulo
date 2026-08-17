@@ -412,8 +412,8 @@ function itemSheet(id){
 
   const comps = [...pts].sort((a,b)=>a.date<b.date?1:-1).map(c=>`
     <div class="comp ${c.excluded||c.out?"excluded":""}">
-      <span class="p">${eur(c.price)}</span>
-      <span>${esc(srcLabel(c.source))} <span class="dim">· ${fr(c.date)}</span>${c.note?` <span class="dim">· ${esc(c.note)}</span>`:""}${c.out?' <span class="dim">· écarté (aberrant)</span>':""}</span>
+      <span class="p">${eur(c.price)}${c.shipping>0?`<span class="dim" style="font-weight:400;font-size:11px"> +${eur(c.shipping)} port</span>`:""}</span>
+      <span>${esc(srcLabel(c.source))} <span class="dim">· ${fr(c.date)}</span>${c.shipping>0?` <span class="dim">· total ${eur(c.total)}</span>`:""}${c.note?` <span class="dim">· ${esc(c.note)}</span>`:""}${c.out?' <span class="dim">· écarté (aberrant)</span>':""}</span>
       <span class="w">${c.excluded?"ignoré":"poids "+(c.weight||0).toFixed(2)}</span>
       <span><button class="x" data-toggle-comp="${c.id}" title="Ignorer / réintégrer">${c.excluded?"↺":"⦸"}</button><button class="x" data-del-comp="${c.id}" title="Supprimer">✕</button></span>
     </div>`).join("") || `<p class="note">Ajoute une vente eBay conclue, un prix tendance Cardmarket, une vente d'un groupe… chaque ligne pèse selon sa source et sa fraîcheur.</p>`;
@@ -451,13 +451,14 @@ function itemSheet(id){
     <span class="eyebrow">Relevés de prix (${pts.length})</span>
     <div style="margin:8px 0 14px">${comps}</div>
     <div class="f3">
-      <label><span class="lb">Prix</span><input id="c-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0,00"></label>
+      <label><span class="lb">Prix article</span><input id="c-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0,00"></label>
+      <label><span class="lb">Port</span><input id="c-ship" type="number" inputmode="decimal" step="0.01" min="0" value="0" placeholder="0,00"></label>
       <label><span class="lb">Date</span><input id="c-date" type="date" value="${today()}"></label>
-      <label><span class="lb">Source</span><select id="c-source">${Object.entries(S.sources).map(([k,s])=>`<option value="${k}">${esc(s.label)}</option>`).join("")}</select></label>
     </div>
-    <div class="f2">
+    <div class="f3">
+      <label><span class="lb">Source</span><select id="c-source">${Object.entries(S.sources).map(([k,s])=>`<option value="${k}">${esc(s.label)}</option>`).join("")}</select></label>
       <label><span class="lb">Nb de ventes</span><input id="c-count" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
-      <label><span class="lb">Note (état, lot, vendeur…)</span><input id="c-note" placeholder="facultatif"></label>
+      <label><span class="lb">Note</span><input id="c-note" placeholder="facultatif"></label>
     </div>
     <p class="note">Un relevé peut résumer plusieurs ventes : « 9 ventes eBay autour de 104 € cette semaine » → prix 104, nb de ventes 9. C'est ce qui alimente le rythme de vente.</p>
     <div class="actions">
@@ -594,7 +595,9 @@ document.addEventListener("click", async ev=>{
     if(ac){
       const price = document.getElementById("c-price").value;
       if(!(parseFloat(price)>0)) return document.getElementById("c-price").focus();
-      await api(`/api/items/${ac.dataset.addComp}/comps`, {json:{price, date:document.getElementById("c-date").value,
+      await api(`/api/items/${ac.dataset.addComp}/comps`, {json:{price,
+        shipping:document.getElementById("c-ship").value || 0,
+        date:document.getElementById("c-date").value,
         source:document.getElementById("c-source").value, note:document.getElementById("c-note").value.trim(),
         sold_count:document.getElementById("c-count").value}});
       await refresh(); return itemSheet(ac.dataset.addComp);
