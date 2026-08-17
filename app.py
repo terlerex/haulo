@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import media as media_mod
+import deals as deals_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -37,6 +38,7 @@ SESSION_DAYS = int(os.environ.get("SESSION_DAYS", "90"))
 COOKIE = "pkmn_session"
 
 MEDIA = media_mod.media_dir(DB)  # <dossier DB>/media, jamais /data en dur
+DEAL_MEDIA = MEDIA / "_deals"     # sous-namespace dédié pour ne pas collisionner avec les item_id
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -116,6 +118,42 @@ def init() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS media_item ON media(item_id, sort_order);
+            CREATE TABLE IF NOT EXISTS deals(
+                id TEXT PRIMARY KEY,
+                item_id TEXT REFERENCES items(id) ON DELETE SET NULL,
+                name TEXT NOT NULL DEFAULT '',
+                type TEXT NOT NULL DEFAULT 'scelle',
+                lang TEXT DEFAULT '',
+                grade TEXT DEFAULT '',
+                platform TEXT NOT NULL DEFAULT 'autre',
+                lot_price REAL NOT NULL DEFAULT 0,
+                lot_shipping REAL NOT NULL DEFAULT 0,
+                qty INTEGER NOT NULL DEFAULT 1,
+                is_import INTEGER NOT NULL DEFAULT 0,
+                is_ioss INTEGER NOT NULL DEFAULT 0,
+                split_mode TEXT NOT NULL DEFAULT 'value',
+                resale_prices TEXT NOT NULL DEFAULT '{}',
+                resale_shipping_out REAL NOT NULL DEFAULT 0,
+                packaging_cost REAL NOT NULL DEFAULT 0,
+                buyer_pays_shipping INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            -- Photos rattachées à un deal (table séparée de `media` car les deals ne
+            -- sont pas des items : pas de FK vers items(id), on évite de casser la
+            -- contrainte FK ON avec des ids de nature différente).
+            CREATE TABLE IF NOT EXISTS deal_media(
+                id TEXT PRIMARY KEY,
+                deal_id TEXT NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                mime TEXT NOT NULL DEFAULT 'image/webp',
+                size_bytes INTEGER NOT NULL,
+                width INTEGER, height INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS deal_media_deal ON deal_media(deal_id, sort_order);
             """
         )
         migrate(con)
@@ -161,6 +199,28 @@ def put_settings(s: dict) -> None:
             "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (json.dumps(s),),
         )
+
+
+def get_deal_params() -> dict:
+    with db() as con:
+        row = con.execute("SELECT v FROM settings WHERE k='deal_params'").fetchone()
+    return deals_mod.merge_params(json.loads(row["v"]) if row else None)
+
+
+def put_deal_params(p: dict) -> dict:
+    current = get_deal_params()
+    current.update({k: v for k, v in p.items() if k != "platform_fees"})
+    if isinstance(p.get("platform_fees"), dict):
+        for k, v in p["platform_fees"].items():
+            if k in current["platform_fees"] and isinstance(v, dict):
+                current["platform_fees"][k].update(v)
+    with db() as con:
+        con.execute(
+            "INSERT INTO settings(k,v) VALUES('deal_params',?) "
+            "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (json.dumps(current),),
+        )
+    return current
 
 
 # ------------------------------------------------------------------------ auth
@@ -702,20 +762,299 @@ def api_get_thumb(iid: str, pid: str):
     return FileResponse(path, media_type="image/webp")
 
 
+# ------------------------------------------------------------------ achat-revente
+
+DEAL_FIELDS = ["item_id", "name", "type", "lang", "grade", "platform", "lot_price",
+               "lot_shipping", "qty", "is_import", "is_ioss", "split_mode",
+               "resale_shipping_out", "packaging_cost", "buyer_pays_shipping",
+               "status", "notes"]
+
+
+def clean_deal(p: dict) -> dict:
+    return {
+        "item_id": (str(p["item_id"]) if p.get("item_id") else None),
+        "name": str(p.get("name", ""))[:200],
+        "type": p.get("type") if p.get("type") in ("scelle", "loose", "gradee") else "scelle",
+        "lang": str(p.get("lang", ""))[:10],
+        "grade": str(p.get("grade", ""))[:40],
+        "platform": p.get("platform") if p.get("platform") in deals_mod.PLATFORMS_BUY else "autre",
+        "lot_price": max(0.0, float(p.get("lot_price") or 0)),
+        "lot_shipping": max(0.0, float(p.get("lot_shipping") or 0)),
+        "qty": max(1, int(p.get("qty") or 1)),
+        "is_import": int(bool(p.get("is_import"))),
+        "is_ioss": int(bool(p.get("is_ioss"))),
+        "split_mode": p.get("split_mode") if p.get("split_mode") in ("value", "equal") else "value",
+        "resale_shipping_out": max(0.0, float(p.get("resale_shipping_out") or 0)),
+        "packaging_cost": max(0.0, float(p.get("packaging_cost") or 0)),
+        "buyer_pays_shipping": int(bool(p.get("buyer_pays_shipping"))),
+        "status": "done" if p.get("status") == "done" else "open",
+        "notes": str(p.get("notes", ""))[:2000],
+    }
+
+
+def _deal_row_to_dict(row: dict) -> dict:
+    d = dict(row)
+    d["is_import"] = bool(d["is_import"])
+    d["is_ioss"] = bool(d["is_ioss"])
+    d["buyer_pays_shipping"] = bool(d["buyer_pays_shipping"])
+    try:
+        d["resale_prices"] = json.loads(d.get("resale_prices") or "{}")
+    except Exception:
+        d["resale_prices"] = {}
+    return d
+
+
+def _deal_photos(did: str) -> list[dict]:
+    with db() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT id, deal_id, filename, mime, size_bytes, width, height, sort_order, created_at "
+            "FROM deal_media WHERE deal_id=? ORDER BY sort_order, created_at", (did,)
+        )]
+    for p in rows:
+        p["url"] = f"/api/deals/{did}/photos/{p['id']}"
+        p["thumb_url"] = f"/api/deals/{did}/photos/{p['id']}/thumb"
+    return rows
+
+
+def _deal_view(row: dict, items_by_id: dict) -> dict:
+    d = _deal_row_to_dict(row)
+    params = get_deal_params()
+    item_est = None
+    if d["item_id"] and d["item_id"] in items_by_id:
+        item_est = items_by_id[d["item_id"]]["est"]["value"]
+    computed = deals_mod.build_deal_view(d, params, item_est=item_est)
+    d["computed"] = computed
+    d["photos"] = _deal_photos(d["id"])
+    return d
+
+
+@app.get("/api/deals")
+def api_list_deals():
+    st = build_state(snapshot=False)
+    items_by_id = {i["id"]: i for i in st["items"]}
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM deals ORDER BY created_at DESC")]
+    return {"deals": [_deal_view(r, items_by_id) for r in rows], "params": get_deal_params()}
+
+
+@app.post("/api/deals")
+def api_add_deal(p: dict = Body(...)):
+    d = clean_deal(p)
+    if not d["item_id"] and not d["name"]:
+        raise HTTPException(400, "nom manquant (ou lien vers un item existant)")
+    resale_prices = p.get("resale_prices") or {}
+    resale_prices = {k: float(v) for k, v in resale_prices.items()
+                      if k in deals_mod.PLATFORMS_SELL and v not in (None, "")}
+    did = nid()
+    with db() as con:
+        con.execute(
+            f"INSERT INTO deals(id,{','.join(DEAL_FIELDS)},resale_prices,created_at) "
+            f"VALUES(?,{','.join('?' * len(DEAL_FIELDS))},?,?)",
+            (did, *[d[f] for f in DEAL_FIELDS], json.dumps(resale_prices),
+             datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"id": did}
+
+
+@app.put("/api/deals/{did}")
+def api_edit_deal(did: str, p: dict = Body(...)):
+    d = clean_deal(p)
+    resale_prices = p.get("resale_prices") or {}
+    resale_prices = {k: float(v) for k, v in resale_prices.items()
+                      if k in deals_mod.PLATFORMS_SELL and v not in (None, "")}
+    with db() as con:
+        cur = con.execute(
+            f"UPDATE deals SET {','.join(f + '=?' for f in DEAL_FIELDS)}, resale_prices=? WHERE id=?",
+            (*[d[f] for f in DEAL_FIELDS], json.dumps(resale_prices), did),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "opération introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/deals/{did}")
+def api_del_deal(did: str):
+    with db() as con:
+        con.execute("DELETE FROM deal_media WHERE deal_id=?", (did,))
+        con.execute("DELETE FROM deals WHERE id=?", (did,))
+    media_mod.delete_item_dir(DEAL_MEDIA, did)
+    return {"ok": True}
+
+
+@app.post("/api/deals/{did}/realize")
+def api_realize_deal(did: str):
+    """Marque l'opération réalisée : bascule au portefeuille avec le coût de
+    revient réel comme prix d'achat. Crée l'item si le deal n'en avait pas.
+    Les photos du deal sont copiées sur l'item (le deal garde les siennes,
+    l'historique de l'opération reste consultable)."""
+    with db() as con:
+        row = con.execute("SELECT * FROM deals WHERE id=?", (did,)).fetchone()
+        if not row:
+            raise HTTPException(404, "opération introuvable")
+    d = _deal_row_to_dict(dict(row))
+    params = get_deal_params()
+    cost = deals_mod.landed_cost(d, params)
+    per_unit = cost["per_unit"]
+
+    iid = d["item_id"]
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        if iid:
+            con.execute(
+                "UPDATE items SET status='owned', buy_price=?, qty=?, buy_date=? WHERE id=?",
+                (per_unit, d["qty"] or 1, date.today().isoformat(), iid),
+            )
+        else:
+            iid = nid()
+            con.execute(
+                "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, d["name"] or "Item sans nom", d["type"], d["lang"] or "FR", d["grade"], "",
+                 d["qty"] or 1, per_unit, date.today().isoformat(), d["notes"], "owned", 0.0, now),
+            )
+        con.execute("UPDATE deals SET status='done', item_id=? WHERE id=?", (iid, did))
+
+    # Copie (pas déplacement) des photos du deal vers l'item.
+    for ph in _deal_photos(did):
+        src = media_mod.photo_path(DEAL_MEDIA, did, ph["id"], thumb=False)
+        src_thumb = media_mod.photo_path(DEAL_MEDIA, did, ph["id"], thumb=True)
+        if not src:
+            continue
+        new_pid = secrets.token_hex(8)
+        dest_dir = MEDIA / iid
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / f"{new_pid}.webp").write_bytes(src.read_bytes())
+        if src_thumb:
+            (dest_dir / f"{new_pid}.thumb.webp").write_bytes(src_thumb.read_bytes())
+        with db() as con:
+            maxo = con.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) AS m FROM media WHERE item_id=?", (iid,)
+            ).fetchone()["m"]
+            con.execute(
+                "INSERT INTO media(id,item_id,filename,mime,size_bytes,width,height,sort_order,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (new_pid, iid, f"{new_pid}.webp", ph["mime"], ph["size_bytes"],
+                 ph["width"], ph["height"], maxo + 1, now),
+            )
+
+    return {"ok": True, "item_id": iid, "buy_price": per_unit}
+
+
+@app.get("/api/deal-params")
+def api_get_deal_params():
+    return get_deal_params()
+
+
+@app.put("/api/deal-params")
+def api_put_deal_params(p: dict = Body(...)):
+    return put_deal_params(p)
+
+
+# --- photos sur les deals (mêmes règles que sur les items : 8 max, 10 Mo, auth globale) ---
+
+@app.post("/api/deals/{did}/photos")
+async def api_add_deal_photo(did: str, file: UploadFile = File(...)):
+    with db() as con:
+        if not con.execute("SELECT 1 FROM deals WHERE id=?", (did,)).fetchone():
+            raise HTTPException(404, "opération introuvable")
+        n = con.execute("SELECT COUNT(*) AS n FROM deal_media WHERE deal_id=?", (did,)).fetchone()["n"]
+    if n >= media_mod.MAX_PHOTOS_PER_ITEM:
+        raise HTTPException(400, f"limite atteinte : {media_mod.MAX_PHOTOS_PER_ITEM} photos par opération")
+
+    raw = await file.read()
+    try:
+        info = media_mod.save_photo(DEAL_MEDIA, did, raw, (file.content_type or "").strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        maxo = con.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM deal_media WHERE deal_id=?", (did,)
+        ).fetchone()["m"]
+        con.execute(
+            "INSERT INTO deal_media(id,deal_id,filename,mime,size_bytes,width,height,sort_order,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (info["id"], did, info["filename"], "image/webp",
+             info["size_bytes"], info["width"], info["height"], maxo + 1, now),
+        )
+    return {"id": info["id"], "url": f"/api/deals/{did}/photos/{info['id']}",
+            "thumb_url": f"/api/deals/{did}/photos/{info['id']}/thumb"}
+
+
+@app.delete("/api/deals/{did}/photos/{pid}")
+def api_del_deal_photo(did: str, pid: str):
+    with db() as con:
+        if not con.execute("SELECT id FROM deal_media WHERE deal_id=? AND id=?", (did, pid)).fetchone():
+            raise HTTPException(404, "photo introuvable")
+        con.execute("DELETE FROM deal_media WHERE id=?", (pid,))
+    media_mod.delete_photo(DEAL_MEDIA, did, pid)
+    return {"ok": True}
+
+
+@app.put("/api/deals/{did}/photos/order")
+def api_reorder_deal_photos(did: str, p: dict = Body(...)):
+    order = p.get("order")
+    if not isinstance(order, list):
+        raise HTTPException(400, "order doit être une liste")
+    with db() as con:
+        rows = {r["id"] for r in con.execute("SELECT id FROM deal_media WHERE deal_id=?", (did,))}
+        for i, pid in enumerate(order):
+            if pid in rows:
+                con.execute("UPDATE deal_media SET sort_order=? WHERE id=?", (i, pid))
+    return {"ok": True}
+
+
+@app.get("/api/deals/{did}/photos/{pid}")
+def api_get_deal_photo(did: str, pid: str):
+    path = media_mod.photo_path(DEAL_MEDIA, did, pid, thumb=False)
+    if not path:
+        raise HTTPException(404, "photo introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+@app.get("/api/deals/{did}/photos/{pid}/thumb")
+def api_get_deal_thumb(did: str, pid: str):
+    path = media_mod.photo_path(DEAL_MEDIA, did, pid, thumb=True)
+    if not path:
+        raise HTTPException(404, "vignette introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
 # --------------------------------------------------------------------------- export
+
+def _deals_export_list() -> list[dict]:
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM deals")]
+    out = []
+    for row in rows:
+        d = _deal_row_to_dict(row)
+        d["photos"] = [
+            {k: v for k, v in p.items() if k not in ("url", "thumb_url", "deal_id")}
+            for p in _deal_photos(d["id"])
+        ]
+        out.append(d)
+    return out
+
 
 @app.get("/api/export")
 def api_export():
     st = build_state(snapshot=False)
-    return {"items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"]}
+    return {
+        "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
+        "deals": _deals_export_list(), "deal_params": get_deal_params(),
+    }
 
 
 @app.get("/api/export.zip")
 def api_export_zip():
-    """Export complet : data.json + tous les fichiers media dans un ZIP."""
+    """Export complet : data.json + tous les fichiers media (items + deals) dans un ZIP."""
     import io, zipfile
     st = build_state(snapshot=False)
-    payload = {"items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"]}
+    payload = {
+        "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
+        "deals": _deals_export_list(), "deal_params": get_deal_params(),
+    }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("data.json", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -723,6 +1062,10 @@ def api_export_zip():
             for f in media_mod.list_item_files(MEDIA, it["id"]):
                 # Chemin relatif dans le ZIP : media/<item_id>/<filename>
                 z.write(f, arcname=f"media/{it['id']}/{f.name}")
+        for d in payload["deals"]:
+            for f in media_mod.list_item_files(DEAL_MEDIA, d["id"]):
+                # Namespace séparé pour les deals : deal_media/<deal_id>/<filename>
+                z.write(f, arcname=f"deal_media/{d['id']}/{f.name}")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -742,7 +1085,8 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
 
     import io, zipfile
 
-    zip_photos: dict[str, dict[str, bytes]] = {}   # {item_id: {filename: bytes}}
+    zip_photos: dict[str, dict[str, bytes]] = {}       # {item_id: {filename: bytes}}
+    zip_deal_photos: dict[str, dict[str, bytes]] = {}  # {deal_id: {filename: bytes}}
     if raw[:4] == b"PK\x03\x04":  # signature ZIP
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -752,11 +1096,13 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     raise HTTPException(400, "ZIP sans data.json")
                 data: Any = json.loads(data_bytes.decode("utf-8"))
                 for name in z.namelist():
-                    # media/<item_id>/<filename>
                     parts = name.split("/")
                     if len(parts) == 3 and parts[0] == "media" and parts[2]:
                         iid, fname = parts[1], parts[2]
                         zip_photos.setdefault(iid, {})[fname] = z.read(name)
+                    elif len(parts) == 3 and parts[0] == "deal_media" and parts[2]:
+                        did, fname = parts[1], parts[2]
+                        zip_deal_photos.setdefault(did, {})[fname] = z.read(name)
         except zipfile.BadZipFile:
             raise HTTPException(400, "ZIP invalide")
     else:
@@ -774,6 +1120,8 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute("DELETE FROM media")
             con.execute("DELETE FROM items")
             con.execute("DELETE FROM snapshots")
+            con.execute("DELETE FROM deal_media")
+            con.execute("DELETE FROM deals")
         for it in items:
             iid = str(it.get("id") or nid())
             d = clean({**it, "set_name": it.get("set_name") or it.get("set", "")})
@@ -824,9 +1172,44 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                 "INSERT OR REPLACE INTO snapshots(d,value,invested) VALUES(?,?,?)",
                 (str(s.get("d"))[:10], float(s.get("value") or 0), float(s.get("invested") or 0)),
             )
+        for dl in data.get("deals") or []:
+            did = str(dl.get("id") or nid())
+            dd = clean_deal(dl)
+            resale_prices = dl.get("resale_prices") or {}
+            resale_prices = {k: float(v) for k, v in resale_prices.items()
+                              if k in deals_mod.PLATFORMS_SELL and v not in (None, "")}
+            con.execute(
+                f"INSERT OR REPLACE INTO deals(id,{','.join(DEAL_FIELDS)},resale_prices,created_at) "
+                f"VALUES(?,{','.join('?' * len(DEAL_FIELDS))},?,?)",
+                (did, *[dd[f] for f in DEAL_FIELDS], json.dumps(resale_prices),
+                 str(dl.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            files_for_deal = zip_deal_photos.get(did, {})
+            for ph in dl.get("photos") or []:
+                fname = ph.get("filename") or ""
+                if fname and fname in files_for_deal:
+                    dpath = DEAL_MEDIA / did
+                    dpath.mkdir(parents=True, exist_ok=True)
+                    (dpath / fname).write_bytes(files_for_deal[fname])
+                    pid = fname.removesuffix(".webp")
+                    thumb_name = f"{pid}.thumb.webp"
+                    if thumb_name in files_for_deal:
+                        (dpath / thumb_name).write_bytes(files_for_deal[thumb_name])
+                    con.execute(
+                        "INSERT OR REPLACE INTO deal_media(id,deal_id,filename,mime,size_bytes,width,height,sort_order,created_at)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
+                        (str(ph.get("id") or pid), did, fname,
+                         str(ph.get("mime", "image/webp")),
+                         int(ph.get("size_bytes") or len(files_for_deal[fname])),
+                         ph.get("width"), ph.get("height"),
+                         int(ph.get("sort_order") or 0),
+                         str(ph.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+                    )
     if isinstance(data.get("settings"), dict):
         api_settings(data["settings"])
-    return {"ok": True, "items": len(items)}
+    if isinstance(data.get("deal_params"), dict):
+        put_deal_params(data["deal_params"])
+    return {"ok": True, "items": len(items), "deals": len(data.get("deals") or [])}
 
 
 @app.get("/api/ping")

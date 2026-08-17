@@ -194,14 +194,19 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 <div class="modes">
   <button class="chip big" data-mode="owned" aria-pressed="true">Portefeuille</button>
   <button class="chip big" data-mode="watch" aria-pressed="false">Veille <span id="watch-count"></span></button>
+  <button class="chip big" data-mode="deals" aria-pressed="false">Achat-revente</button>
 </div>
 
-<div class="filters">
+<div class="filters" id="filters-items">
   <button class="chip" data-filter="all" aria-pressed="true">Tout</button>
   <button class="chip" data-filter="scelle" aria-pressed="false">Scellé</button>
   <button class="chip" data-filter="loose" aria-pressed="false">Loose</button>
   <button class="chip" data-filter="gradee" aria-pressed="false">Gradée</button>
   <input class="search" id="search" type="search" placeholder="Rechercher…" aria-label="Rechercher un item">
+</div>
+<div class="filters" id="deal-toolbar" style="display:none">
+  <button class="btn primary" data-action="new-deal">+ Nouvelle opération</button>
+  <button class="btn ghost" data-action="deal-settings">Paramètres achat-revente</button>
 </div>
 
 <div class="rows" id="rows"></div>
@@ -215,6 +220,13 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
 const TYPES = {scelle:"Scellé", loose:"Loose", gradee:"Gradée"};
 let S = null, filter = "all", query = "", openItem = null, mode = "owned";
+let deals = null, dealParams = null;
+const SELL_PLATFORMS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
+
+async function loadDeals(){
+  const r = await api("/api/deals");
+  deals = r.deals; dealParams = r.params;
+}
 
 /* ---------------- accès API ---------------- */
 async function api(path, opts={}){
@@ -290,7 +302,66 @@ function trendBadge(v, suffix="%"){
 }
 const sales = v => v==null ? "—" : v>=10 ? Math.round(v)+"/mois" : v.toFixed(1).replace(".",",")+"/mois";
 
+function renderDeals(){
+  const host = document.getElementById("rows");
+  if(!Array.isArray(deals)){ host.innerHTML = `<div class="empty">Chargement…</div>`; return; }
+  if(!deals.length){
+    host.innerHTML = `<div class="empty"><b>Aucune opération</b>
+      Décris un achat en cours (lot ou carte isolée) pour voir le bénéfice net et le prix plancher par plateforme avant de te décider.
+      <div style="margin-top:14px"><button class="btn primary" data-action="new-deal">+ Nouvelle opération</button></div></div>`;
+    return;
+  }
+  host.innerHTML = deals.map(d=>{
+    const c = d.computed, best = c.best;
+    const name = d.item_id ? (S.items.find(i=>i.id===d.item_id)?.name || d.name || "Item lié") : (d.name || "Sans nom");
+    const doneTag = d.status==="done" ? `<span class="tag" style="color:var(--gain);border-color:rgba(74,222,155,.4);margin-left:6px">Réalisée</span>` : "";
+    const detail = c.results.length ? `
+      <details style="margin-top:10px">
+        <summary class="eyebrow" style="cursor:pointer">Détail du calcul</summary>
+        <div style="margin-top:8px;font-size:13px">
+          <div class="dim" style="margin-bottom:4px">Coût de revient débarqué</div>
+          <div class="comp" style="grid-template-columns:1fr auto"><span>Prix article + port</span><span class="p">${eur(c.cost.lot_price+c.cost.lot_shipping)}</span></div>
+          ${c.cost.is_import?`
+          <div class="comp" style="grid-template-columns:1fr auto"><span>TVA import (${c.cost.vat_rate_pct}%)</span><span class="p">${eur(c.cost.vat_import)}</span></div>
+          <div class="comp" style="grid-template-columns:1fr auto"><span>Douane (${c.cost.duty_rate_pct}%)</span><span class="p">${eur(c.cost.duty)}</span></div>
+          <div class="comp" style="grid-template-columns:1fr auto"><span>Frais de dossier${c.cost.is_ioss?" (neutralisés IOSS)":""}</span><span class="p">${eur(c.cost.carrier_fee)}</span></div>`:""}
+          <div class="comp" style="grid-template-columns:1fr auto"><span><b>Total lot</b></span><span class="p"><b>${eur(c.cost.total_lot)}</b></span></div>
+          <div class="comp" style="grid-template-columns:1fr auto"><span><b>Coût / unité (${c.cost.qty})</b></span><span class="p"><b>${eur(c.cost.per_unit)}</b></span></div>
+          <div class="dim" style="margin:10px 0 4px">Net par plateforme</div>
+          ${c.results.map(r=>`
+            <div class="comp" style="grid-template-columns:1fr auto">
+              <span>${esc(r.label)} — vente ${eur(r.price)}${r.commission?`, commission ${eur(r.commission)}`:""}${r.shipping_out?`, port ${eur(r.shipping_out)}`:""}${r.packaging?`, emballage ${eur(r.packaging)}`:""}</span>
+              <span class="p ${r.benefice>=0?"gain":"loss"}">${eur(r.net)}</span>
+            </div>
+            <div class="dim" style="font-size:11px;margin:-4px 0 6px">bénéfice ${eur(r.benefice)} (${pct(r.benefice_pct)}) · plancher ${eur(r.floor_price)}</div>
+          `).join("")}
+        </div>
+      </details>` : `<p class="note">Ajoute un prix de revente visé (eBay, Vinted ou Cardmarket) pour voir le bénéfice.</p>`;
+    return `<div class="rows" style="margin-bottom:10px">
+      <div style="padding:14px 16px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><b style="font-size:15px">${esc(name)}</b>${doneTag}
+            <div class="dim" style="font-size:12px;margin-top:2px">Achat ${esc(d.platform)} · ${d.qty} u · coût de revient ${eur(c.cost.per_unit)}/u</div>
+          </div>
+          <div style="text-align:right">
+            ${best ? `<div class="num ${best.benefice>=0?"gain":"loss"}" style="font-size:18px;font-weight:700">${eur(best.benefice)}</div>
+              <div class="dim" style="font-size:11px">${esc(best.label)} · ${pct(best.benefice_pct)}</div>`
+              : `<div class="dim" style="font-size:12px">pas de revente visée</div>`}
+          </div>
+        </div>
+        ${detail}
+        <div class="actions" style="margin-top:10px">
+          <button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>
+          <button class="btn" data-edit-deal="${d.id}">Modifier</button>
+          ${d.status!=="done" ? `<button class="btn primary" data-realize-deal="${d.id}">Marquer réalisée</button>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function renderRows(){
+  if(mode==="deals") return renderDeals();
   const host = document.getElementById("rows");
   const pool = S.items.filter(i => (i.status||"owned")===mode);
   document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
@@ -568,6 +639,116 @@ function settingsForm(){
   `,"center");
 }
 
+function dealPhotosBlock(d){
+  const photos = d?.photos || [];
+  if(!d) return "";
+  return `
+    <div style="margin:12px 0 4px">
+      <span class="eyebrow">Photos (${photos.length}/8)</span>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center">
+        ${photos.map((p,idx)=>`
+          <div style="position:relative;width:64px;height:64px">
+            <a href="${p.url}" target="_blank" style="display:block;width:100%;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--line)">
+              <img src="${p.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
+            </a>
+            <button class="x" data-del-deal-photo="${p.id}" data-deal-owner="${d.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;font-size:11px">✕</button>
+            ${idx>0?`<button class="x" data-deal-photo-up="${p.id}" data-deal-owner="${d.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;font-size:11px">←</button>`:''}
+          </div>`).join("")}
+        ${photos.length < 8 ? `
+          <label style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;border:1px dashed var(--line);border-radius:8px;cursor:pointer;color:var(--muted);font-size:20px;margin:0" title="Ajouter des photos">
+            +
+            <input id="deal-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple data-deal="${d.id}" hidden>
+          </label>` : ''}
+      </div>
+    </div>`;
+}
+
+function dealForm(id){
+  const d = id ? deals.find(x=>x.id===id) : null;
+  const rp = d?.resale_prices || {};
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">${d?"Modifier":"Nouvelle"} opération</span>
+      <h2>${d?esc(d.name||"Opération"):"Achat-revente"}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+
+    <label><span class="lb">Item lié (optionnel)</span>
+      <select id="d-item">
+        <option value="">— Saisie libre —</option>
+        ${(S?.items||[]).map(i=>`<option value="${i.id}" ${d?.item_id===i.id?"selected":""}>${esc(i.name)}</option>`).join("")}
+      </select>
+    </label>
+    <div class="f2">
+      <label><span class="lb">Nom (si pas de lien)</span><input id="d-name" value="${esc(d?.name||"")}" placeholder="Lot 10 cartes SV Japon"></label>
+      <label><span class="lb">Type</span><select id="d-type">
+        ${Object.entries(TYPES).map(([k,l])=>`<option value="${k}" ${d?.type===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="f3">
+      <label><span class="lb">Langue</span><input id="d-lang" value="${esc(d?.lang||"")}" placeholder="JP"></label>
+      <label><span class="lb">Grade</span><input id="d-grade" value="${esc(d?.grade||"")}" placeholder="facultatif"></label>
+      <label><span class="lb">Plateforme d'achat</span><select id="d-platform">
+        ${["vinted","ebay","cardmarket","japan_proxy","autre"].map(p=>`<option value="${p}" ${d?.platform===p?"selected":""}>${p}</option>`).join("")}
+      </select></label>
+    </div>
+    <hr class="sep">
+    <div class="f3">
+      <label><span class="lb">Prix du lot (total)</span><input id="d-price" type="number" step="0.01" min="0" value="${d?.lot_price??""}"></label>
+      <label><span class="lb">Port (achat)</span><input id="d-ship" type="number" step="0.01" min="0" value="${d?.lot_shipping??0}"></label>
+      <label><span class="lb">Quantité (lot)</span><input id="d-qty" type="number" min="1" step="1" value="${d?.qty??1}"></label>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-import" ${d?.is_import?"checked":""} style="width:auto"> <span>Achat hors UE (déclenche TVA + douane)</span></label>
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-ioss" ${d?.is_ioss?"checked":""} style="width:auto"> <span>Sous IOSS (&lt; ${dealParams?.ioss_threshold??150}€, TVA déjà payée à l'achat)</span></label>
+    <label><span class="lb">Répartition du coût sur le lot</span><select id="d-split">
+      <option value="value" ${d?.split_mode!=="equal"?"selected":""}>Au prorata de la valeur</option>
+      <option value="equal" ${d?.split_mode==="equal"?"selected":""}>Parts égales</option>
+    </select></label>
+    <p class="note">Avec un seul prix pour tout le lot, les deux modes donnent le même coût par unité. La distinction ne jouera que le jour où tu détailleras un prix de revente différent par carte du lot.</p>
+    <hr class="sep">
+    <span class="eyebrow">Revente visée (vide = reprend l'estimation de l'item lié)</span>
+    <div class="f3" style="margin-top:8px">
+      <label><span class="lb">eBay</span><input id="d-rp-ebay" type="number" step="0.01" min="0" value="${rp.ebay??""}"></label>
+      <label><span class="lb">Vinted</span><input id="d-rp-vinted" type="number" step="0.01" min="0" value="${rp.vinted??""}"></label>
+      <label><span class="lb">Cardmarket</span><input id="d-rp-cardmarket" type="number" step="0.01" min="0" value="${rp.cardmarket??""}"></label>
+    </div>
+    <div class="f3">
+      <label><span class="lb">Port sortant</span><input id="d-ship-out" type="number" step="0.01" min="0" value="${d?.resale_shipping_out??0}"></label>
+      <label><span class="lb">Emballage</span><input id="d-pack" type="number" step="0.01" min="0" value="${d?.packaging_cost??0}"></label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="d-buyer-ship" ${d?.buyer_pays_shipping?"checked":""} style="width:auto"> <span>Port à charge acheteur (eBay)</span></label>
+    </div>
+    <label><span class="lb">Notes</span><textarea id="d-notes" rows="2">${esc(d?.notes||"")}</textarea></label>
+    ${dealPhotosBlock(d)}
+    <div class="actions">
+      ${d? `<button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>`:""}
+      <button class="btn primary" data-save-deal="${d?.id||""}">Enregistrer</button>
+    </div>
+  `,"center");
+}
+
+function dealSettingsForm(){
+  const p = dealParams;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Réglages</span><h2>Achat-revente</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="f3">
+      <label><span class="lb">TVA import (%)</span><input id="dp-vat" type="number" min="0" step="0.5" value="${p.vat_rate}"></label>
+      <label><span class="lb">Droits de douane (%)</span><input id="dp-duty" type="number" min="0" step="0.5" value="${p.duty_rate}"></label>
+      <label><span class="lb">Frais de dossier (€)</span><input id="dp-carrier" type="number" min="0" step="1" value="${p.carrier_fee}"></label>
+    </div>
+    <label><span class="lb">Seuil IOSS (€)</span><input id="dp-ioss" type="number" min="0" step="1" value="${p.ioss_threshold}"></label>
+    <p class="note">Taux vérifiés le ${p.verified_at}. Mets-les à jour si tu as une info plus récente.</p>
+    <hr class="sep">
+    <span class="eyebrow">Frais par plateforme de revente</span>
+    <div class="f2" style="margin-top:8px">
+      ${Object.entries(SELL_PLATFORMS).map(([k,label])=>`
+        <div>
+          <label><span class="lb">${label} — commission (%)</span><input data-pf-pct="${k}" type="number" min="0" step="0.5" value="${p.platform_fees[k]?.pct??0}"></label>
+          <label><span class="lb">${label} — frais fixe (€)</span><input data-pf-fixed="${k}" type="number" min="0" step="0.05" value="${p.platform_fees[k]?.fixed??0}"></label>
+        </div>`).join("")}
+    </div>
+    <div class="actions"><button class="btn primary" data-save-deal-params>Enregistrer</button></div>
+  `,"center");
+}
+
 /* ---------------- actions ---------------- */
 document.addEventListener("click", async ev=>{
   const t = ev.target;
@@ -661,10 +842,87 @@ document.addEventListener("click", async ev=>{
         fees:document.getElementById("s-fee").value, trimK:document.getElementById("s-k").value, weights}});
       closeSheet(); return refresh();
     }
+
+    // --- Achat-revente ---
+    if(act==="new-deal") return dealForm(null);
+    if(act==="deal-settings") return dealSettingsForm();
+    const edD = t.closest("[data-edit-deal]"); if(edD) return dealForm(edD.dataset.editDeal);
+
+    const sd = t.closest("[data-save-deal]");
+    if(sd){
+      const g = x => document.getElementById(x).value.trim();
+      const gc = x => document.getElementById(x).checked;
+      const resale_prices = {};
+      ["ebay","vinted","cardmarket"].forEach(k=>{
+        const v = g(`d-rp-${k}`); if(v) resale_prices[k] = v;
+      });
+      const body = {
+        item_id: g("d-item") || null, name: g("d-name"), type: g("d-type"),
+        lang: g("d-lang"), grade: g("d-grade"), platform: g("d-platform"),
+        lot_price: g("d-price"), lot_shipping: g("d-ship"), qty: g("d-qty"),
+        is_import: gc("d-import"), is_ioss: gc("d-ioss"), split_mode: g("d-split"),
+        resale_prices, resale_shipping_out: g("d-ship-out"), packaging_cost: g("d-pack"),
+        buyer_pays_shipping: gc("d-buyer-ship"), notes: g("d-notes"),
+      };
+      const id = sd.dataset.saveDeal;
+      const saved = id ? await api("/api/deals/"+id, {json:body, method:"PUT"})
+                        : await api("/api/deals", {json:body, method:"POST"});
+      await loadDeals(); closeSheet(); return renderRows();
+    }
+    const dd = t.closest("[data-del-deal]");
+    if(dd){
+      if(!confirm("Supprimer cette opération ?")) return;
+      await api("/api/deals/"+dd.dataset.delDeal,{method:"DELETE"});
+      await loadDeals(); closeSheet(); return renderRows();
+    }
+    const rd = t.closest("[data-realize-deal]");
+    if(rd){
+      if(!confirm("Marquer réalisée ? L'item bascule au portefeuille avec le coût de revient comme prix d'achat.")) return;
+      await api(`/api/deals/${rd.dataset.realizeDeal}/realize`,{method:"POST"});
+      await Promise.all([loadDeals(), refresh()]); return renderRows();
+    }
+    const sdp = t.closest("[data-save-deal-params]");
+    if(sdp){
+      const platform_fees = {};
+      document.querySelectorAll("[data-pf-pct]").forEach(el=>{
+        platform_fees[el.dataset.pfPct] = {...(platform_fees[el.dataset.pfPct]||{}), pct: el.value};
+      });
+      document.querySelectorAll("[data-pf-fixed]").forEach(el=>{
+        platform_fees[el.dataset.pfFixed] = {...(platform_fees[el.dataset.pfFixed]||{}), fixed: el.value};
+      });
+      await api("/api/deal-params",{method:"PUT", json:{
+        vat_rate:document.getElementById("dp-vat").value,
+        duty_rate:document.getElementById("dp-duty").value,
+        carrier_fee:document.getElementById("dp-carrier").value,
+        ioss_threshold:document.getElementById("dp-ioss").value,
+        platform_fees,
+      }});
+      await loadDeals(); closeSheet(); return renderRows();
+    }
+    const ddp = t.closest("[data-del-deal-photo]");
+    if(ddp){
+      if(!confirm("Supprimer cette photo ?")) return;
+      await api(`/api/deals/${ddp.dataset.dealOwner}/photos/${ddp.dataset.delDealPhoto}`,{method:"DELETE"});
+      await loadDeals(); return dealForm(ddp.dataset.dealOwner);
+    }
+    const dpu = t.closest("[data-deal-photo-up]");
+    if(dpu){
+      const did = dpu.dataset.dealOwner;
+      const deal = deals.find(x=>x.id===did); if(!deal) return;
+      const ids = (deal.photos||[]).map(p=>p.id);
+      const i0 = ids.indexOf(dpu.dataset.dealPhotoUp);
+      if(i0>0){ ids.splice(i0,1); ids.unshift(dpu.dataset.dealPhotoUp); }
+      await api(`/api/deals/${did}/photos/order`,{method:"PUT", json:{order:ids}});
+      await loadDeals(); return dealForm(did);
+    }
+
     const mchip = t.closest("[data-mode]");
     if(mchip){
       mode = mchip.dataset.mode;
       document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c===mchip));
+      document.getElementById("filters-items").style.display = mode==="deals" ? "none" : "flex";
+      document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
+      if(mode==="deals" && !deals) await loadDeals();
       return renderRows();
     }
     const chip = t.closest("[data-filter]");
@@ -709,6 +967,22 @@ document.addEventListener("change", async e=>{
       await api(`/api/items/${iid}/photos`,{method:"POST", body:fd});
     }
     await refresh(); return itemSheet(iid);
+  }catch(err){ alert("Upload impossible : "+err.message); }
+});
+
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="deal-photo-file") return;
+  const did = e.target.dataset.deal;
+  const files = Array.from(e.target.files||[]);
+  e.target.value = "";
+  if(!files.length || !did) return;
+  try{
+    for(const f of files){
+      if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); continue; }
+      const fd = new FormData(); fd.append("file", f);
+      await api(`/api/deals/${did}/photos`,{method:"POST", body:fd});
+    }
+    await loadDeals(); return dealForm(did);
   }catch(err){ alert("Upload impossible : "+err.message); }
 });
 
