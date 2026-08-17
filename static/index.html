@@ -3,222 +3,259 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0E1220">
+<meta name="theme-color" content="#0F1114">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Portefeuille">
 <title>Portefeuille Pokémon</title>
 <style>
 :root{
-  --ink:#0E1220; --panel:#161C31; --panel2:#1E2540; --line:#2A3352;
-  --text:#E8ECF7; --muted:#8C97B8; --gain:#4ADE9B; --loss:#FF7A6B;
-  --gold:#E8B75A; --blue:#6BA8FF; --violet:#B36BFF;
+  --ink:#0F1114; --panel:#17191D; --panel2:#1D2024; --line:#24272C;
+  --text:#ECEEF1; --muted:#8A8F97; --accent:#3EDC7B; --loss:#FF6B5E;
+  --tag-scelle-fg:#D9B54A; --tag-scelle-bg:rgba(217,181,74,.10); --tag-scelle-bd:rgba(217,181,74,.28);
+  --tag-loose-fg:#6FA1F5; --tag-loose-bg:rgba(111,161,245,.10); --tag-loose-bd:rgba(111,161,245,.28);
+  --tag-gradee-fg:#A98BF0; --tag-gradee-bg:rgba(169,139,240,.10); --tag-gradee-bd:rgba(169,139,240,.28);
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --r:10px;
+  --r:14px; --r-sm:10px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
-body{background:var(--ink);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.45;
-  background-attachment:fixed;
-  background-image:radial-gradient(900px 500px at 15% -10%, rgba(107,168,255,.10) 0%, transparent 60%),
-                     radial-gradient(700px 400px at 95% 0%, rgba(179,107,255,.08) 0%, transparent 55%);}
-.wrap{max-width:1180px;margin:0 auto;padding:22px 18px 80px}
-.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+body{background:var(--ink);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.45}
+.eyebrow{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
 button,input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 button{cursor:pointer}
-:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.gain{color:var(--accent)} .loss{color:var(--loss)}
 
-/* ---- header ---- */
-header.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:18px}
-.brand{display:flex;align-items:baseline;gap:10px}
-.brand h1{font-size:16px;margin:0;letter-spacing:-.01em;font-weight:650}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap}
-.btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 12px;border-radius:var(--r);
-  font-size:13px;transition:border-color .15s,background .15s}
-.btn:hover{border-color:#3D4A73;background:#232B49}
-.btn.primary{background:linear-gradient(180deg,#2E4A8C,#22386C);border-color:#3E5EA8}
+/* ---- structure ---- */
+.appshell{min-height:100dvh;display:flex;flex-direction:column}
+header.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--ink);z-index:30}
+.brand{display:flex;align-items:center;gap:8px;font-weight:650;font-size:15.5px;letter-spacing:-.01em}
+.brand .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.icon-btn{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:var(--r-sm);
+  width:40px;height:40px;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;font-size:17px}
+.icon-btn:hover{border-color:#33373d}
+
+.shell{flex:1;display:flex;min-height:0}
+main.content{flex:1;min-width:0;overflow-y:auto;padding:16px 16px calc(148px + env(safe-area-inset-bottom))}
+
+nav.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:35;display:flex;
+  background:var(--panel);border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom);height:60px}
+nav.tabbar button{flex:1;height:100%;min-height:44px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:500}
+nav.tabbar button[aria-pressed="true"]{color:var(--accent)}
+nav.tabbar .ico{font-size:19px;line-height:1}
+
+.fab{position:fixed;right:16px;bottom:calc(60px + env(safe-area-inset-bottom) + 14px);z-index:36;
+  width:56px;height:56px;border-radius:50%;background:var(--accent);color:#06120B;border:none;
+  font-size:26px;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.fab-label{display:none}
+
+@media (min-width:900px){
+  .shell{flex-direction:row}
+  nav.tabbar{position:static;flex-direction:column;justify-content:flex-start;align-items:stretch;
+    width:220px;height:auto;border-top:none;border-right:1px solid var(--line);padding:14px 10px;gap:4px}
+  nav.tabbar button{flex:none;flex-direction:row;justify-content:flex-start;gap:10px;padding:11px 12px;
+    border-radius:var(--r-sm);font-size:14px;height:auto;min-height:44px}
+  nav.tabbar button[aria-pressed="true"]{background:var(--panel2)}
+  .fab{position:static;margin:0 0 14px;border-radius:var(--r-sm);width:auto;height:44px;
+    display:flex;align-items:center;justify-content:center;gap:8px;font-size:20px;box-shadow:none}
+  .fab-label{display:inline;font-size:14px;font-weight:600}
+  main.content{padding:24px 28px 40px;max-width:900px}
+}
+
+/* ---- hero ---- */
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:20px;margin-bottom:16px}
+.hero-grid{display:grid;grid-template-columns:1fr;gap:18px}
+.total{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:clamp(30px,8vw,42px);font-weight:650;
+  line-height:1;letter-spacing:-.02em;margin:6px 0 12px;color:var(--text)}
+.kpis{display:flex;gap:20px;flex-wrap:wrap}
+.kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:16px;font-weight:600;margin-top:2px}
+.chart{width:100%;height:96px;display:block}
+.chart-empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--line);border-radius:var(--r-sm);padding:16px;text-align:center}
+@media (min-width:640px){ .hero-grid{grid-template-columns:minmax(220px,1fr) minmax(260px,1.1fr);align-items:end} }
+
+/* ---- filters ---- */
+.filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.chip{background:transparent;border:1px solid var(--line);color:var(--muted);padding:7px 12px;min-height:36px;
+  border-radius:999px;font-size:12.5px}
+.chip[aria-pressed="true"]{background:var(--panel2);color:var(--text);border-color:#3a3e44}
+.search{margin-left:auto;background:var(--panel);border:1px solid var(--line);border-radius:999px;
+  padding:9px 14px;min-height:40px;min-width:160px}
+
+/* ---- listes en cards ---- */
+.list{display:flex;flex-direction:column;gap:8px}
+.card-item{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);
+  border-radius:var(--r);background:var(--panel);text-align:left;width:100%}
+.card-item:hover{border-color:#2e3238}
+.card-thumb{width:44px;height:44px;border-radius:10px;object-fit:cover;flex-shrink:0;
+  background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:19px;color:var(--muted)}
+.card-thumb img{width:100%;height:100%;object-fit:cover;border-radius:10px;display:block}
+.card-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.card-title-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.card-title{font-weight:600;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:650;font-size:15px;white-space:nowrap}
+.card-sub-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
+.card-sub-row .r{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.tag{display:inline-block;font-size:10px;letter-spacing:.04em;text-transform:uppercase;
+  padding:2px 7px;border-radius:5px;border:1px solid}
+.t-scelle{color:var(--tag-scelle-fg);border-color:var(--tag-scelle-bd);background:var(--tag-scelle-bg)}
+.t-loose{color:var(--tag-loose-fg);border-color:var(--tag-loose-bd);background:var(--tag-loose-bg)}
+.t-gradee{color:var(--tag-gradee-fg);border-color:var(--tag-gradee-bd);background:var(--tag-gradee-bg)}
+.dim{color:var(--muted)}
+.pru-flag{font-size:10px;color:var(--muted);font-family:var(--mono)}
+.empty{padding:44px 20px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--text);margin-bottom:6px;font-size:15px}
+
+/* ---- boutons ---- */
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:10px 14px;
+  min-height:44px;border-radius:var(--r-sm);font-size:13.5px}
+.btn:hover{border-color:#3a3e44}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#06120B;font-weight:600}
 .btn.ghost{background:transparent}
 .btn.danger:hover{border-color:var(--loss);color:var(--loss)}
 
-/* ---- hero ---- */
-.hero{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:16px;overflow:hidden;position:relative}
-.hero::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
-  background:linear-gradient(100deg,#7DE2FC,#B36BFF,#FF9BD2,#7DE2FC);background-size:300% 100%;animation:sheen 9s linear infinite}
-@keyframes sheen{to{background-position:300% 0}}
-.hero-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(280px,1.1fr);gap:24px;align-items:end}
-.total{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:clamp(34px,7vw,54px);font-weight:700;line-height:1;
-  letter-spacing:-.03em;margin:6px 0 10px;
-  background:linear-gradient(100deg,#7DE2FC,#B36BFF,#FF9BD2,#7DE2FC);background-size:300% 100%;
-  -webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 9s linear infinite}
-.kpis{display:flex;gap:22px;flex-wrap:wrap}
-.kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600;margin-top:2px}
-.gain{color:var(--gain)} .loss{color:var(--loss)}
-.chart{width:100%;height:120px;display:block}
-.chart-empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--line);border-radius:var(--r);padding:16px;text-align:center}
+/* ---- menu (sheet d'actions) ---- */
+.menu-list{display:flex;flex-direction:column;gap:6px}
+.menu-item{background:var(--panel2);border:1px solid var(--line);color:var(--text);text-align:left;
+  padding:12px 14px;min-height:44px;border-radius:var(--r-sm);font-size:14px}
+.menu-item:hover{border-color:#3a3e44}
+.menu-item.danger{color:var(--loss)}
 
-/* ---- filters ---- */
-.filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:20px 0 10px}
-.chip{background:transparent;border:1px solid var(--line);color:var(--muted);padding:6px 11px;border-radius:999px;font-size:12.5px}
-.chip[aria-pressed="true"]{background:var(--panel2);color:var(--text);border-color:#44548A}
-.search{margin-left:auto;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:7px 13px;min-width:180px}
-
-/* ---- table ---- */
-.rows{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
-.row{display:grid;grid-template-columns:minmax(0,2.4fr) .8fr .5fr .9fr 1fr 1.05fr .9fr;gap:12px;padding:12px 16px;align-items:center;
-  border-top:1px solid var(--line)}
-.row:first-child{border-top:none}
-.row.head{background:var(--panel2);position:sticky;top:0;z-index:2}
-.row.head span{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
-.row.item{cursor:pointer;transition:background .12s}
-.row.item:hover{background:#1A2138}
-.name{min-width:0}
-.name b{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.name small{color:var(--muted);font-size:11.5px}
-.tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
-  padding:2px 7px;border-radius:5px;border:1px solid}
-.t-scelle{color:var(--gold);border-color:rgba(232,183,90,.35);background:rgba(232,183,90,.08)}
-.t-loose{color:var(--blue);border-color:rgba(107,168,255,.35);background:rgba(107,168,255,.08)}
-.t-gradee{color:var(--violet);border-color:rgba(179,107,255,.35);background:rgba(179,107,255,.08)}
-.right{text-align:right}
-.dim{color:var(--muted)}
-.pru-flag{font-size:10px;color:var(--muted);font-family:var(--mono)}
-.empty{padding:40px 20px;text-align:center;color:var(--muted)}
-.empty b{display:block;color:var(--text);margin-bottom:6px;font-size:15px}
-
-/* ---- modal / drawer ---- */
-.backdrop{position:fixed;inset:0;background:rgba(6,9,18,.72);backdrop-filter:blur(3px);z-index:50;display:flex;justify-content:flex-end}
-.sheet{background:var(--panel);border-left:1px solid var(--line);width:min(560px,100%);height:100%;overflow-y:auto;padding:22px}
-.sheet.center{margin:auto;border:1px solid var(--line);border-radius:16px;height:auto;max-height:92vh;width:min(520px,94%)}
-.sheet h2{margin:2px 0 2px;font-size:19px;letter-spacing:-.01em}
+/* ---- modal / sheet ---- */
+.backdrop{position:fixed;inset:0;background:rgba(6,7,9,.68);z-index:50;display:flex;justify-content:flex-end}
+.backdrop.align-bottom{justify-content:center;align-items:flex-end}
+.sheet{background:var(--panel);border-left:1px solid var(--line);width:min(560px,100%);height:100%;
+  overflow-y:auto;padding:20px}
+.sheet.center{margin:auto;border:1px solid var(--line);border-radius:var(--r);height:auto;
+  max-height:92vh;width:min(520px,94%)}
+.sheet.bottom{margin:0;border:1px solid var(--line);border-bottom:none;border-radius:16px 16px 0 0;
+  height:90dvh;width:100%;max-width:560px}
+.sheet h2{margin:2px 0 2px;font-size:18px;letter-spacing:-.01em}
 .sheet-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:18px}
 label{display:block;margin-bottom:12px}
-label .lb{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
-input,select,textarea{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
-input:hover,select:hover{border-color:#3D4A73}
+label .lb{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
+input,select,textarea{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:11px;min-height:44px}
+textarea{min-height:auto}
+input:hover,select:hover{border-color:#3a3e44}
 .f2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
 .f3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 12px}
-.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap}
 
-/* ---- estimation block (signature) ---- */
-.est{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}
+/* ---- bloc estimation ---- */
+.est{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);padding:16px;margin:16px 0}
 .est-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:14px}
-.est-val{font-family:var(--mono);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
-.conf{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;padding:3px 8px;border-radius:5px;border:1px solid}
-.c-haute{color:var(--gain);border-color:rgba(74,222,155,.4)}
-.c-moyenne{color:var(--gold);border-color:rgba(232,183,90,.4)}
-.c-faible{color:var(--loss);border-color:rgba(255,122,107,.4)}
+.est-val{font-family:var(--mono);font-size:24px;font-weight:650;font-variant-numeric:tabular-nums}
+.conf{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:5px;border:1px solid}
+.c-haute{color:var(--accent);border-color:rgba(62,220,123,.35)}
+.c-moyenne{color:var(--tag-scelle-fg);border-color:var(--tag-scelle-bd)}
+.c-faible{color:var(--loss);border-color:rgba(255,107,94,.35)}
 .axis{position:relative;height:64px;margin:2px 0 6px}
 .axis .line{position:absolute;left:0;right:0;top:34px;height:1px;background:var(--line)}
-.dot{position:absolute;top:34px;transform:translate(-50%,-50%);border-radius:50%;background:var(--blue);border:1px solid #0E1220}
-.dot.out{background:#3A4468}
-.marker{position:absolute;top:16px;bottom:8px;width:2px;background:var(--gain);transform:translateX(-50%)}
-.marker::after{content:"est.";position:absolute;top:-13px;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:9px;color:var(--gain);letter-spacing:.1em}
+.dot{position:absolute;top:34px;transform:translate(-50%,-50%);border-radius:50%;background:var(--accent);border:1px solid var(--ink)}
+.dot.out{background:#3a3e44}
+.marker{position:absolute;top:16px;bottom:8px;width:2px;background:var(--tag-scelle-fg);transform:translateX(-50%)}
+.marker::after{content:"est.";position:absolute;top:-13px;left:50%;transform:translateX(-50%);font-size:9px;
+  color:var(--tag-scelle-fg);letter-spacing:.08em}
 .axis .lbl{position:absolute;top:46px;font-family:var(--mono);font-size:10px;color:var(--muted)}
-.comp{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.comp{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center;padding:9px 0;
+  border-top:1px solid var(--line);font-size:13px}
 .comp .p{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600}
 .comp.excluded{opacity:.45}
 .w{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
-.x{background:none;border:none;color:var(--muted);padding:2px 6px;border-radius:6px}
-.x:hover{color:var(--loss);background:rgba(255,122,107,.1)}
+.x{background:none;border:none;color:var(--muted);padding:4px 7px;border-radius:6px;min-width:32px;min-height:32px}
+.x:hover{color:var(--loss);background:rgba(255,107,94,.1)}
 .note{font-size:12.5px;color:var(--muted);margin:10px 0 0}
-.warn{background:rgba(232,183,90,.1);border:1px solid rgba(232,183,90,.35);color:var(--gold);padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+.warn{background:rgba(217,181,74,.1);border:1px solid var(--tag-scelle-bd);color:var(--tag-scelle-fg);
+  padding:10px 12px;border-radius:var(--r-sm);font-size:13px;margin-bottom:14px}
 hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
-.modes{display:flex;gap:6px;margin:22px 0 0}
-.chip.big{padding:9px 16px;font-size:13.5px;border-radius:10px}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:14px;margin:14px 0 0}
-.stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:18px;font-weight:600;margin-top:2px}
+.stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600;margin-top:2px}
 .stat .s{font-size:11.5px;color:var(--muted)}
-.hist{width:100%;height:112px;display:block;margin:6px 0 2px}
-.badge{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;padding:2px 7px;border-radius:5px;border:1px solid;white-space:nowrap}
-.b-up{color:var(--gain);border-color:rgba(74,222,155,.4)}
-.b-down{color:var(--loss);border-color:rgba(255,122,107,.4)}
+.hist{width:100%;height:104px;display:block;margin:6px 0 2px}
+.badge{font-size:10.5px;letter-spacing:.03em;padding:3px 8px;border-radius:5px;border:1px solid;white-space:nowrap}
+.b-up{color:var(--accent);border-color:rgba(62,220,123,.35)}
+.b-down{color:var(--loss);border-color:rgba(255,107,94,.35)}
 .b-flat{color:var(--muted);border-color:var(--line)}
-.row.watch{grid-template-columns:minmax(0,2.4fr) .8fr 1fr 1fr 1fr 1.1fr}
-@media (max-width:860px){
-  .row.watch{grid-template-columns:1fr 1fr}
-  .hero-grid{grid-template-columns:1fr}
-  .row{grid-template-columns:1fr 1fr;gap:4px 12px;padding:14px 14px}
-  .row.head{display:none}
-  .row .name{grid-column:1 / -1}
-  .row .cell::before{content:attr(data-l) " ";font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
-    text-transform:uppercase;color:var(--muted);display:block}
-  .right{text-align:left}
-  .f3{grid-template-columns:1fr 1fr}
-}
+
+@media (max-width:640px){ .f3{grid-template-columns:1fr 1fr} }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="appshell">
 
-<header class="top">
-  <div class="brand">
-    <h1>Portefeuille Pokémon</h1>
-    <span class="eyebrow" id="stamp">connexion…</span>
-  </div>
-  <div class="toolbar">
-    <button class="btn primary" data-action="new-item">+ Ajouter un item</button>
-    <button class="btn" data-action="snapshot">Enregistrer un point</button>
-    <button class="btn ghost" data-action="settings">Réglages</button>
-    <button class="btn ghost" data-action="export">Exporter</button>
-    <button class="btn ghost" data-action="import">Importer</button>
-    <button class="btn ghost" data-action="logout">Déconnexion</button>
-    <input type="file" id="file" accept="application/json" hidden>
-  </div>
+<header class="topbar">
+  <div class="brand"><span class="dot"></span><span id="stamp-name">Portefeuille</span></div>
+  <button class="icon-btn" data-action="menu" aria-label="Menu">⋯</button>
 </header>
 
-<div id="storage-warn"></div>
+<div class="shell">
+  <nav class="tabbar" aria-label="Navigation principale">
+    <button class="fab" id="fab" aria-label="Ajouter un relevé de prix">
+      <span aria-hidden="true">+</span><span class="fab-label">Ajouter un relevé</span>
+    </button>
+    <button data-mode="owned" aria-pressed="true"><span class="ico">◆</span><span>Portefeuille</span></button>
+    <button data-mode="watch" aria-pressed="false"><span class="ico">◇</span><span>Veille <span id="watch-count"></span></span></button>
+    <button data-mode="deals" aria-pressed="false"><span class="ico">⇄</span><span>Achat-revente</span></button>
+  </nav>
 
-<section class="hero">
-  <div class="hero-grid">
-    <div>
-      <span class="eyebrow">Valeur estimée du portefeuille</span>
-      <div class="total num" id="total">—</div>
-      <div class="kpis">
-        <div class="kpi"><span class="eyebrow">Investi</span><div class="v num" id="invested">—</div></div>
-        <div class="kpi"><span class="eyebrow">Plus-value</span><div class="v num" id="pnl">—</div></div>
-        <div class="kpi"><span class="eyebrow">Net de frais</span><div class="v num" id="net">—</div></div>
-        <div class="kpi"><span class="eyebrow">Items</span><div class="v num" id="count">—</div></div>
+  <main class="content">
+    <div id="storage-warn"></div>
+
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <span class="eyebrow">Valeur estimée du portefeuille</span>
+          <div class="total num" id="total">—</div>
+          <div class="kpis">
+            <div class="kpi"><span class="eyebrow">Investi</span><div class="v num" id="invested">—</div></div>
+            <div class="kpi"><span class="eyebrow">Plus-value</span><div class="v num" id="pnl">—</div></div>
+            <div class="kpi"><span class="eyebrow">Net de frais</span><div class="v num" id="net">—</div></div>
+            <div class="kpi"><span class="eyebrow">Items</span><div class="v num" id="count">—</div></div>
+          </div>
+        </div>
+        <div>
+          <span class="eyebrow">Progression</span>
+          <div id="chart-host"></div>
+        </div>
       </div>
+    </section>
+
+    <div class="filters" id="filters-items">
+      <button class="chip" data-filter="all" aria-pressed="true">Tout</button>
+      <button class="chip" data-filter="scelle" aria-pressed="false">Scellé</button>
+      <button class="chip" data-filter="loose" aria-pressed="false">Loose</button>
+      <button class="chip" data-filter="gradee" aria-pressed="false">Gradée</button>
+      <input class="search" id="search" type="search" placeholder="Rechercher…" aria-label="Rechercher un item">
     </div>
-    <div>
-      <span class="eyebrow">Progression</span>
-      <div id="chart-host"></div>
+    <div class="filters" id="deal-toolbar" style="display:none">
+      <button class="btn primary" data-action="new-deal">+ Nouvelle opération</button>
+      <button class="btn ghost" data-action="deal-settings">Paramètres</button>
     </div>
-  </div>
-</section>
 
-<div class="modes">
-  <button class="chip big" data-mode="owned" aria-pressed="true">Portefeuille</button>
-  <button class="chip big" data-mode="watch" aria-pressed="false">Veille <span id="watch-count"></span></button>
-  <button class="chip big" data-mode="deals" aria-pressed="false">Achat-revente</button>
+    <div class="list" id="rows"></div>
+  </main>
 </div>
-
-<div class="filters" id="filters-items">
-  <button class="chip" data-filter="all" aria-pressed="true">Tout</button>
-  <button class="chip" data-filter="scelle" aria-pressed="false">Scellé</button>
-  <button class="chip" data-filter="loose" aria-pressed="false">Loose</button>
-  <button class="chip" data-filter="gradee" aria-pressed="false">Gradée</button>
-  <input class="search" id="search" type="search" placeholder="Rechercher…" aria-label="Rechercher un item">
-</div>
-<div class="filters" id="deal-toolbar" style="display:none">
-  <button class="btn primary" data-action="new-deal">+ Nouvelle opération</button>
-  <button class="btn ghost" data-action="deal-settings">Paramètres achat-revente</button>
-</div>
-
-<div class="rows" id="rows"></div>
 
 </div>
 
+<input type="file" id="file" accept="application/json,.zip" hidden>
 <div id="overlay"></div>
 
 <script>
 "use strict";
 
 const TYPES = {scelle:"Scellé", loose:"Loose", gradee:"Gradée"};
+const TYPE_EMOJI = {scelle:"📦", loose:"🃏", gradee:"🏆"};
 let S = null, filter = "all", query = "", openItem = null, mode = "owned";
 let deals = null, dealParams = null;
 const SELL_PLATFORMS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
@@ -269,13 +306,13 @@ function render(){
   const n = document.getElementById("net");
   n.textContent = eur(t.net); n.className = "v num " + (t.net>=0?"gain":"loss");
   document.getElementById("chart-host").innerHTML = chartSVG();
-  document.getElementById("stamp").textContent = S.items.length + " items · synchronisé";
+  document.getElementById("stamp-name").textContent = "Portefeuille";
   renderRows();
 }
 function chartSVG(){
   const s = S.snapshots;
-  if(s.length<2) return `<div class="chart-empty">Deux points suffisent pour tracer la courbe. Reviens demain, ou clique « Enregistrer un point ».</div>`;
-  const W=520,H=120,P=6;
+  if(s.length<2) return `<div class="chart-empty">Deux points suffisent pour tracer la courbe. Reviens demain, ou enregistre un point depuis le menu.</div>`;
+  const W=520,H=96,P=6;
   const vals = s.flatMap(p=>[p.value,p.invested]);
   const lo = Math.min(...vals)*0.97, hi = Math.max(...vals)*1.03 || 1;
   const x = i => P + i*(W-2*P)/(s.length-1);
@@ -285,12 +322,12 @@ function chartSVG(){
   const diff = s[s.length-1].value - s[0].value;
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Évolution du portefeuille">
     <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#6BA8FF" stop-opacity=".35"/><stop offset="100%" stop-color="#6BA8FF" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#3EDC7B" stop-opacity=".28"/><stop offset="100%" stop-color="#3EDC7B" stop-opacity="0"/>
     </linearGradient></defs>
     <path d="${area}" fill="url(#g)"/>
-    <path d="${path("invested")}" fill="none" stroke="#3A4468" stroke-width="1.5" stroke-dasharray="3 3"/>
-    <path d="${path("value")}" fill="none" stroke="#6BA8FF" stroke-width="2"/>
-    <circle cx="${x(s.length-1).toFixed(1)}" cy="${y(s[s.length-1].value).toFixed(1)}" r="3.5" fill="#7DE2FC"/>
+    <path d="${path("invested")}" fill="none" stroke="#4A4E54" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <path d="${path("value")}" fill="none" stroke="#3EDC7B" stroke-width="2"/>
+    <circle cx="${x(s.length-1).toFixed(1)}" cy="${y(s[s.length-1].value).toFixed(1)}" r="3.5" fill="#6FE8A6"/>
   </svg>
   <div class="eyebrow" style="margin-top:6px">${s.length} points · depuis le ${fr(s[0].d)} : <span class="${diff>=0?'gain':'loss'}">${eur(diff)}</span> · tirets = investi</div>`;
 }
@@ -301,6 +338,12 @@ function trendBadge(v, suffix="%"){
   return `<span class="badge ${c}">${arrow} ${(v>=0?"+":"")}${v.toFixed(1).replace(".",",")}${suffix}</span>`;
 }
 const sales = v => v==null ? "—" : v>=10 ? Math.round(v)+"/mois" : v.toFixed(1).replace(".",",")+"/mois";
+
+function thumbOf(entity){
+  const p = (entity.photos||[])[0];
+  if(p) return `<img src="${p.thumb_url}" alt="">`;
+  return TYPE_EMOJI[entity.type] || "📦";
+}
 
 function renderDeals(){
   const host = document.getElementById("rows");
@@ -314,7 +357,7 @@ function renderDeals(){
   host.innerHTML = deals.map(d=>{
     const c = d.computed, best = c.best;
     const name = d.item_id ? (S.items.find(i=>i.id===d.item_id)?.name || d.name || "Item lié") : (d.name || "Sans nom");
-    const doneTag = d.status==="done" ? `<span class="tag" style="color:var(--gain);border-color:rgba(74,222,155,.4);margin-left:6px">Réalisée</span>` : "";
+    const doneTag = d.status==="done" ? `<span class="tag" style="color:var(--accent);border-color:rgba(62,220,123,.35);margin-left:6px">Réalisée</span>` : "";
     const detail = c.results.length ? `
       <details style="margin-top:10px">
         <summary class="eyebrow" style="cursor:pointer">Détail du calcul</summary>
@@ -337,24 +380,22 @@ function renderDeals(){
           `).join("")}
         </div>
       </details>` : `<p class="note">Ajoute un prix de revente visé (eBay, Vinted ou Cardmarket) pour voir le bénéfice.</p>`;
-    return `<div class="rows" style="margin-bottom:10px">
-      <div style="padding:14px 16px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
-          <div><b style="font-size:15px">${esc(name)}</b>${doneTag}
-            <div class="dim" style="font-size:12px;margin-top:2px">Achat ${esc(d.platform)} · ${d.qty} u · coût de revient ${eur(c.cost.per_unit)}/u</div>
-          </div>
-          <div style="text-align:right">
-            ${best ? `<div class="num ${best.benefice>=0?"gain":"loss"}" style="font-size:18px;font-weight:700">${eur(best.benefice)}</div>
-              <div class="dim" style="font-size:11px">${esc(best.label)} · ${pct(best.benefice_pct)}</div>`
-              : `<div class="dim" style="font-size:12px">pas de revente visée</div>`}
-          </div>
+    return `<div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <div><b style="font-size:14.5px">${esc(name)}</b>${doneTag}
+          <div class="dim" style="font-size:12px;margin-top:2px">Achat ${esc(d.platform)} · ${d.qty} u · coût de revient ${eur(c.cost.per_unit)}/u</div>
         </div>
-        ${detail}
-        <div class="actions" style="margin-top:10px">
-          <button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>
-          <button class="btn" data-edit-deal="${d.id}">Modifier</button>
-          ${d.status!=="done" ? `<button class="btn primary" data-realize-deal="${d.id}">Marquer réalisée</button>` : ""}
+        <div style="text-align:right">
+          ${best ? `<div class="num ${best.benefice>=0?"gain":"loss"}" style="font-size:17px;font-weight:700">${eur(best.benefice)}</div>
+            <div class="dim" style="font-size:11px">${esc(best.label)} · ${pct(best.benefice_pct)}</div>`
+            : `<div class="dim" style="font-size:12px">pas de revente visée</div>`}
         </div>
+      </div>
+      ${detail}
+      <div class="actions" style="margin-top:10px">
+        <button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>
+        <button class="btn" data-edit-deal="${d.id}">Modifier</button>
+        ${d.status!=="done" ? `<button class="btn primary" data-realize-deal="${d.id}">Marquer réalisée</button>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -385,43 +426,42 @@ function renderRows(){
   if(!list.length){ host.innerHTML = `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`; return; }
 
   if(mode==="watch"){
-    const head = `<div class="row watch head"><span>Item</span><span>Type</span><span class="right">Prix estimé</span>
-      <span class="right">Tendance 30j</span><span class="right">Ventes</span><span class="right">Objectif</span></div>`;
-    host.innerHTML = head + list.map(i=>{
+    host.innerHTML = list.map(i=>{
       const st = i.stats;
-      const thumb = (i.photos||[])[0];
-      return `<div class="row watch item" data-open="${i.id}" tabindex="0" role="button">
-        <div class="name cell" style="display:flex;align-items:center;gap:10px;min-width:0">
-          ${thumb?`<img src="${thumb.thumb_url}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:6px;flex-shrink:0">`:""}
-          <div style="min-width:0"><b>${esc(i.name)}</b><small style="display:block">${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+      return `<button class="card-item" data-open="${i.id}">
+        <div class="card-thumb">${thumbOf(i)}</div>
+        <div class="card-body">
+          <div class="card-title-row">
+            <span class="card-title">${esc(i.name)}</span>
+            <span class="card-value">${eur(i.est.value)}</span>
+          </div>
+          <div class="card-sub-row">
+            <span><span class="tag t-${i.type}">${TYPES[i.type]}</span>
+              ${[i.set_name,i.grade].filter(Boolean).map(esc).join(" · ")}</span>
+            <span class="r">${trendBadge(st.trend30)} ${sales(st.sales_month)}</span>
+          </div>
         </div>
-        <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
-        <div class="cell right num" data-l="Prix estimé"><b>${eur(i.est.value)}</b> <span class="pru-flag">${i.est.n}✓</span></div>
-        <div class="cell right" data-l="Tendance 30j">${trendBadge(st.trend30)}</div>
-        <div class="cell right num" data-l="Ventes">${sales(st.sales_month)}</div>
-        <div class="cell right num" data-l="Objectif">${i.target_price ? eur(i.target_price)+" "+(i.gap!=null?`<span class="${i.gap<=0?"gain":"dim"}">${pct(i.gap)}</span>`:"") : '<span class="dim">—</span>'}</div>
-      </div>`;
+      </button>`;
     }).join("");
     return;
   }
 
-  const head = `<div class="row head"><span>Item</span><span>Type</span><span class="right">Qté</span>
-    <span class="right">PRU</span><span class="right">Est. / u</span><span class="right">Valeur</span><span class="right">±</span></div>`;
-  host.innerHTML = head + list.map(i=>{
+  host.innerHTML = list.map(i=>{
     const d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
-    const thumb = (i.photos||[])[0];
-    return `<div class="row item" data-open="${i.id}" tabindex="0" role="button">
-      <div class="name cell" style="display:flex;align-items:center;gap:10px;min-width:0">
-        ${thumb?`<img src="${thumb.thumb_url}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:6px;flex-shrink:0">`:""}
-        <div style="min-width:0"><b>${esc(i.name)}</b><small style="display:block">${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+    return `<button class="card-item" data-open="${i.id}">
+      <div class="card-thumb">${thumbOf(i)}</div>
+      <div class="card-body">
+        <div class="card-title-row">
+          <span class="card-title">${esc(i.name)}</span>
+          <span class="card-value">${eur(i.value)}</span>
+        </div>
+        <div class="card-sub-row">
+          <span><span class="tag t-${i.type}">${TYPES[i.type]}</span>
+            ${i.qty>1?`× ${i.qty} · `:""}${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span>
+          <span class="r ${d==null?"dim":d>=0?"gain":"loss"}">${pct(d)}</span>
+        </div>
       </div>
-      <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
-      <div class="cell right num" data-l="Qté">${i.qty}</div>
-      <div class="cell right num dim" data-l="PRU">${eur(i.buy_price)}</div>
-      <div class="cell right num" data-l="Est./u">${eur(i.est.value)} ${i.est.fallback?'<span class="pru-flag">PRU</span>':`<span class="pru-flag">${i.est.n}✓</span>`}</div>
-      <div class="cell right num" data-l="Valeur"><b>${eur(i.value)}</b></div>
-      <div class="cell right num ${d==null?"dim":d>=0?"gain":"loss"}" data-l="±">${pct(d)}</div>
-    </div>`;
+    </button>`;
   }).join("");
 }
 
@@ -429,7 +469,7 @@ function renderRows(){
 function historyChart(item){
   const pts = item.est.points.filter(p=>p.price>0);
   if(pts.length<2) return "";
-  const W=480,H=112,PL=4,PT=10,PB=16;
+  const W=480,H=104,PL=4,PT=10,PB=16;
   const maxAge = Math.max(...pts.map(p=>daysAgo(p.date)), 1);
   const vals = pts.map(p=>p.price).concat(item.target_price?[item.target_price]:[]);
   const lo = Math.min(...vals)*0.96, hi = Math.max(...vals)*1.04 || 1;
@@ -437,16 +477,16 @@ function historyChart(item){
   const y = v => H-PB - (v-lo)/((hi-lo)||1)*(H-PT-PB);
   const fit = item.stats.fit;
   const trend = fit ? `<line x1="${x(maxAge).toFixed(1)}" y1="${y(fit.now + fit.slope*(-maxAge)).toFixed(1)}"
-      x2="${x(0).toFixed(1)}" y2="${y(fit.now).toFixed(1)}" stroke="#6BA8FF" stroke-width="1.5" opacity=".8"/>` : "";
+      x2="${x(0).toFixed(1)}" y2="${y(fit.now).toFixed(1)}" stroke="#6E93D6" stroke-width="1.5" opacity=".8"/>` : "";
   const target = item.target_price ? `<line x1="0" y1="${y(item.target_price).toFixed(1)}" x2="${W}" y2="${y(item.target_price).toFixed(1)}"
-      stroke="#E8B75A" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>` : "";
+      stroke="#D9B54A" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>` : "";
   return `<svg class="hist" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Historique des relevés de prix">
     ${target}${trend}
     ${pts.map(p=>`<circle cx="${x(daysAgo(p.date)).toFixed(1)}" cy="${y(p.price).toFixed(1)}" r="${3+Math.min(3,((p.sold_count||1)-1)*0.6)}"
-      fill="${p.out||p.excluded?"#3A4468":"#7DE2FC"}"/>`).join("")}
+      fill="${p.out||p.excluded?"#3a3e44":"#3EDC7B"}"/>`).join("")}
   </svg>
   <div class="eyebrow" style="display:flex;justify-content:space-between">
-    <span>il y a ${Math.round(maxAge)} j</span>${item.target_price?'<span style="color:var(--gold)">— — objectif</span>':""}<span>aujourd'hui</span></div>`;
+    <span>il y a ${Math.round(maxAge)} j</span>${item.target_price?'<span style="color:var(--tag-scelle-fg)">— — objectif</span>':""}<span>aujourd'hui</span></div>`;
 }
 const daysAgo = d => Math.max(0,(Date.now()-new Date(d+"T12:00:00").getTime())/864e5);
 
@@ -463,8 +503,10 @@ function statsBlock(item){
 }
 
 function openSheet(html, cls){
+  const backdropCls = cls==="bottom" ? "backdrop align-bottom" : "backdrop";
+  const sheetCls = cls==="bottom" ? "bottom" : (cls||"");
   document.getElementById("overlay").innerHTML =
-    `<div class="backdrop" data-close><div class="sheet ${cls||""}">${html}</div></div>`;
+    `<div class="${backdropCls}" data-close><div class="sheet ${sheetCls}">${html}</div></div>`;
   const f = document.querySelector(".sheet input, .sheet select, .sheet button");
   if(f) f.focus();
 }
@@ -506,8 +548,8 @@ function itemSheet(id){
             <a href="${p.url}" target="_blank" style="display:block;width:100%;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--line)">
               <img src="${p.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
             </a>
-            <button class="x" data-del-photo="${p.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px">✕</button>
-            ${idx>0?`<button class="x" data-photo-up="${p.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px">←</button>`:''}
+            <button class="x" data-del-photo="${p.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:24px;height:24px;padding:0;line-height:22px;min-width:0;min-height:0">✕</button>
+            ${idx>0?`<button class="x" data-photo-up="${p.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:24px;height:24px;padding:0;line-height:22px;min-width:0;min-height:0">←</button>`:''}
           </div>`).join("")}
         ${(i.photos||[]).length < 8 ? `
           <label style="width:72px;height:72px;display:flex;align-items:center;justify-content:center;border:1px dashed var(--line);border-radius:8px;cursor:pointer;color:var(--muted);font-size:22px;margin:0" title="Ajouter des photos">
@@ -651,8 +693,8 @@ function dealPhotosBlock(d){
             <a href="${p.url}" target="_blank" style="display:block;width:100%;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--line)">
               <img src="${p.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
             </a>
-            <button class="x" data-del-deal-photo="${p.id}" data-deal-owner="${d.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;font-size:11px">✕</button>
-            ${idx>0?`<button class="x" data-deal-photo-up="${p.id}" data-deal-owner="${d.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:20px;height:20px;padding:0;line-height:18px;font-size:11px">←</button>`:''}
+            <button class="x" data-del-deal-photo="${p.id}" data-deal-owner="${d.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✕</button>
+            ${idx>0?`<button class="x" data-deal-photo-up="${p.id}" data-deal-owner="${d.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">←</button>`:''}
           </div>`).join("")}
         ${photos.length < 8 ? `
           <label style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;border:1px dashed var(--line);border-radius:8px;cursor:pointer;color:var(--muted);font-size:20px;margin:0" title="Ajouter des photos">
@@ -696,8 +738,8 @@ function dealForm(id){
       <label><span class="lb">Port (achat)</span><input id="d-ship" type="number" step="0.01" min="0" value="${d?.lot_shipping??0}"></label>
       <label><span class="lb">Quantité (lot)</span><input id="d-qty" type="number" min="1" step="1" value="${d?.qty??1}"></label>
     </div>
-    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-import" ${d?.is_import?"checked":""} style="width:auto"> <span>Achat hors UE (déclenche TVA + douane)</span></label>
-    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-ioss" ${d?.is_ioss?"checked":""} style="width:auto"> <span>Sous IOSS (&lt; ${dealParams?.ioss_threshold??150}€, TVA déjà payée à l'achat)</span></label>
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-import" ${d?.is_import?"checked":""} style="width:auto;min-height:auto"> <span>Achat hors UE (déclenche TVA + douane)</span></label>
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-ioss" ${d?.is_ioss?"checked":""} style="width:auto;min-height:auto"> <span>Sous IOSS (&lt; ${dealParams?.ioss_threshold??150}€, TVA déjà payée à l'achat)</span></label>
     <label><span class="lb">Répartition du coût sur le lot</span><select id="d-split">
       <option value="value" ${d?.split_mode!=="equal"?"selected":""}>Au prorata de la valeur</option>
       <option value="equal" ${d?.split_mode==="equal"?"selected":""}>Parts égales</option>
@@ -713,7 +755,7 @@ function dealForm(id){
     <div class="f3">
       <label><span class="lb">Port sortant</span><input id="d-ship-out" type="number" step="0.01" min="0" value="${d?.resale_shipping_out??0}"></label>
       <label><span class="lb">Emballage</span><input id="d-pack" type="number" step="0.01" min="0" value="${d?.packaging_cost??0}"></label>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="d-buyer-ship" ${d?.buyer_pays_shipping?"checked":""} style="width:auto"> <span>Port à charge acheteur (eBay)</span></label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="d-buyer-ship" ${d?.buyer_pays_shipping?"checked":""} style="width:auto;min-height:auto"> <span>Port à charge acheteur (eBay)</span></label>
     </div>
     <label><span class="lb">Notes</span><textarea id="d-notes" rows="2">${esc(d?.notes||"")}</textarea></label>
     ${dealPhotosBlock(d)}
@@ -749,21 +791,88 @@ function dealSettingsForm(){
   `,"center");
 }
 
+function menuSheet(){
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Menu</span><h2>Actions</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="menu-list">
+      <button class="menu-item" data-action="new-item">+ Nouvel item</button>
+      <button class="menu-item" data-action="new-deal">+ Nouvelle opération achat-revente</button>
+      <button class="menu-item" data-action="snapshot">Enregistrer un point (courbe)</button>
+      <button class="menu-item" data-action="settings">Réglages de l'estimation</button>
+      <button class="menu-item" data-action="deal-settings">Réglages achat-revente</button>
+      <button class="menu-item" data-action="export">Exporter (JSON)</button>
+      <button class="menu-item" data-action="export-zip">Exporter tout (ZIP + photos)</button>
+      <button class="menu-item" data-action="import">Importer</button>
+      <button class="menu-item danger" data-action="logout">Déconnexion</button>
+    </div>
+  `,"center");
+}
+
+/* ---------------- saisie rapide (FAB) ---------------- */
+function quickAddPicker(){
+  if(!S) return;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Ajouter un relevé</span><h2>Choisis un item</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <input class="search" id="qa-search" type="search" placeholder="Rechercher…" style="width:100%;margin:0 0 12px" aria-label="Rechercher un item">
+    <div class="list" id="qa-list"></div>
+  `,"bottom");
+  renderQuickPickList("");
+  document.getElementById("qa-search").addEventListener("input", e=> renderQuickPickList(e.target.value.toLowerCase().trim()));
+}
+function renderQuickPickList(q){
+  const host = document.getElementById("qa-list");
+  const list = S.items.filter(i=> !q || (i.name+" "+(i.set_name||"")).toLowerCase().includes(q))
+    .sort((a,b)=> (b.status==="owned")-(a.status==="owned") || (b.value-a.value));
+  host.innerHTML = list.slice(0,50).map(i=>`
+    <button class="card-item" data-quick-item="${i.id}">
+      <div class="card-thumb">${thumbOf(i)}</div>
+      <div class="card-body">
+        <div class="card-title-row"><span class="card-title">${esc(i.name)}</span></div>
+        <div class="card-sub-row"><span><span class="tag t-${i.type}">${TYPES[i.type]}</span>${i.status==="watch"?" en veille":""}</span></div>
+      </div>
+    </button>`).join("") || `<p class="note">Aucun item ne correspond. Crée-le d'abord depuis le menu.</p>`;
+}
+function quickAddForm(id){
+  const i = S.items.find(x=>x.id===id); if(!i) return;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Nouveau relevé</span><h2>${esc(i.name)}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <label><span class="lb">Prix article</span><input id="qc-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0,00"></label>
+    <div class="f2">
+      <label><span class="lb">Port</span><input id="qc-ship" type="number" inputmode="decimal" step="0.01" min="0" value="0"></label>
+      <label><span class="lb">Source</span><select id="qc-source">${Object.entries(S.sources).map(([k,s])=>`<option value="${k}">${esc(s.label)}</option>`).join("")}</select></label>
+    </div>
+    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-quick-save="${i.id}">Ajouter</button></div>
+  `,"bottom");
+}
+
 /* ---------------- actions ---------------- */
 document.addEventListener("click", async ev=>{
   const t = ev.target;
   try{
     const act = t.closest("[data-action]")?.dataset.action;
+    if(act==="menu") return menuSheet();
     if(act==="new-item") return itemForm(null);
     if(act==="settings") return settingsForm();
-    if(act==="snapshot"){ await api("/api/snapshot",{method:"POST"}); return refresh(); }
+    if(act==="snapshot"){ closeSheet(); await api("/api/snapshot",{method:"POST"}); return refresh(); }
     if(act==="export"){
       const data = await api("/api/export");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
       a.download = `portefeuille-pokemon-${today()}.json`; a.click(); URL.revokeObjectURL(a.href); return;
     }
-    if(act==="import") return document.getElementById("file").click();
+    if(act==="export-zip"){
+      const r = await fetch("/api/export.zip", {credentials:"same-origin"});
+      if(!r.ok) throw new Error("export impossible");
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `portefeuille-pokemon-${today()}.zip`; a.click(); URL.revokeObjectURL(a.href); return;
+    }
+    if(act==="import"){ closeSheet(); return document.getElementById("file").click(); }
 
     if(act==="logout"){ await api("/api/logout",{method:"POST"}); return location.reload(); }
     if(t.closest("[data-close-btn]") || t.hasAttribute("data-close")) return closeSheet();
@@ -914,6 +1023,19 @@ document.addEventListener("click", async ev=>{
       if(i0>0){ ids.splice(i0,1); ids.unshift(dpu.dataset.dealPhotoUp); }
       await api(`/api/deals/${did}/photos/order`,{method:"PUT", json:{order:ids}});
       await loadDeals(); return dealForm(did);
+    }
+
+    // --- saisie rapide ---
+    if(t.id==="fab" || t.closest("#fab")) return quickAddPicker();
+    const qi = t.closest("[data-quick-item]"); if(qi) return quickAddForm(qi.dataset.quickItem);
+    const qs = t.closest("[data-quick-save]");
+    if(qs){
+      const price = document.getElementById("qc-price").value;
+      if(!(parseFloat(price)>0)) return document.getElementById("qc-price").focus();
+      await api(`/api/items/${qs.dataset.quickSave}/comps`, {json:{price,
+        shipping:document.getElementById("qc-ship").value || 0,
+        date: today(), source:document.getElementById("qc-source").value}});
+      closeSheet(); return refresh();
     }
 
     const mchip = t.closest("[data-mode]");
