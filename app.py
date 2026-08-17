@@ -154,6 +154,20 @@ def init() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS deal_media_deal ON deal_media(deal_id, sort_order);
+            -- Prix d'achat détaillés par unité. Facultatif : un item sans ligne ici
+            -- continue d'utiliser items.buy_price x items.qty comme avant (aucune
+            -- régression). Dès qu'au moins une ligne existe pour un item, la quantité
+            -- et le coût de cet item sont ENTIÈREMENT dérivés de ces lignes (somme des
+            -- qty, somme des price*qty) — voir build_state().
+            CREATE TABLE IF NOT EXISTS purchases(
+                id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                price REAL NOT NULL,
+                qty INTEGER NOT NULL DEFAULT 1,
+                date TEXT NOT NULL,
+                note TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS purchases_item ON purchases(item_id);
             """
         )
         migrate(con)
@@ -407,6 +421,9 @@ def load_items() -> list[dict]:
             "SELECT id, item_id, filename, mime, size_bytes, width, height, sort_order, created_at "
             "FROM media ORDER BY item_id, sort_order, created_at"
         )]
+        purchases = [dict(r) for r in con.execute(
+            "SELECT id, item_id, price, qty, date, note FROM purchases ORDER BY date DESC"
+        )]
     by_item: dict[str, list] = {}
     for c in comps:
         c["excluded"] = bool(c["excluded"])
@@ -420,9 +437,13 @@ def load_items() -> list[dict]:
         p["url"] = f"/api/items/{p['item_id']}/photos/{p['id']}"
         p["thumb_url"] = f"/api/items/{p['item_id']}/photos/{p['id']}/thumb"
         photos_by_item.setdefault(p["item_id"], []).append(p)
+    purchases_by_item: dict[str, list] = {}
+    for pu in purchases:
+        purchases_by_item.setdefault(pu["item_id"], []).append(pu)
     for it in items:
         it["comps"] = by_item.get(it["id"], [])
         it["photos"] = photos_by_item.get(it["id"], [])
+        it["purchases"] = purchases_by_item.get(it["id"], [])
     return items
 
 
@@ -432,8 +453,20 @@ def build_state(snapshot: bool = True) -> dict:
     for it in items:
         it["est"] = estimate(it, s)
         it["stats"] = analyse(it)
+        # Prix d'achat détaillés (chantier "prix d'achat par unité") : dès qu'au
+        # moins une ligne existe, qty et buy_price affichés/utilisés viennent
+        # ENTIÈREMENT de ces lignes (somme des quantités, coût réel total). Sans
+        # ligne, comportement strictement inchangé : buy_price x qty du formulaire.
+        lots = it["purchases"]
+        if lots:
+            lot_qty = sum(int(l["qty"]) for l in lots)
+            lot_cost = sum(float(l["price"]) * int(l["qty"]) for l in lots)
+            it["qty"] = lot_qty
+            it["buy_price"] = round(lot_cost / lot_qty, 2) if lot_qty else 0.0  # PRU moyen pondéré
+            it["cost"] = lot_cost
+        else:
+            it["cost"] = it["buy_price"] * it["qty"]
         it["value"] = (it["est"]["value"] or 0) * it["qty"]
-        it["cost"] = it["buy_price"] * it["qty"]
         if it["status"] == "watch":                      # une veille ne pèse pas au bilan
             it["value"] = it["cost"] = 0.0
             it["gap"] = ((it["est"]["value"] - it["target_price"]) / it["target_price"] * 100
@@ -572,6 +605,7 @@ def api_del_item(iid: str):
     with db() as con:
         con.execute("DELETE FROM comps WHERE item_id=?", (iid,))
         con.execute("DELETE FROM media WHERE item_id=?", (iid,))
+        con.execute("DELETE FROM purchases WHERE item_id=?", (iid,))
         con.execute("DELETE FROM items WHERE id=?", (iid,))
     media_mod.delete_item_dir(MEDIA, iid)   # efface aussi les fichiers physiques
     return {"ok": True}
@@ -631,6 +665,53 @@ def api_edit_comp(cid: str, p: dict = Body(...)):
 def api_del_comp(cid: str):
     with db() as con:
         con.execute("DELETE FROM comps WHERE id=?", (cid,))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- prix d'achat
+
+@app.post("/api/items/{iid}/purchases")
+def api_add_purchase(iid: str, p: dict = Body(...)):
+    """Ajoute un prix d'achat détaillé pour tout ou partie de la quantité d'un item.
+    Dès la première ligne posée, qty/buy_price de l'item sont dérivés de l'ensemble
+    des lignes (voir build_state)."""
+    price = float(p.get("price") or 0)
+    if price <= 0:
+        raise HTTPException(400, "prix invalide")
+    qty = max(1, int(p.get("qty") or 1))
+    pid = nid()
+    with db() as con:
+        if not con.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(404, "item introuvable")
+        con.execute(
+            "INSERT INTO purchases(id,item_id,price,qty,date,note) VALUES(?,?,?,?,?,?)",
+            (pid, iid, price, qty, str(p.get("date") or date.today().isoformat())[:10],
+             str(p.get("note", ""))[:200]),
+        )
+    return {"id": pid}
+
+
+@app.put("/api/purchases/{pid}")
+def api_edit_purchase(pid: str, p: dict = Body(...)):
+    price = float(p.get("price") or 0)
+    if price <= 0:
+        raise HTTPException(400, "prix invalide")
+    qty = max(1, int(p.get("qty") or 1))
+    with db() as con:
+        cur = con.execute(
+            "UPDATE purchases SET price=?, qty=?, date=?, note=? WHERE id=?",
+            (price, qty, str(p.get("date") or date.today().isoformat())[:10],
+             str(p.get("note", ""))[:200], pid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "prix d'achat introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/purchases/{pid}")
+def api_del_purchase(pid: str):
+    with db() as con:
+        con.execute("DELETE FROM purchases WHERE id=?", (pid,))
     return {"ok": True}
 
 
@@ -1118,6 +1199,7 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
         if replace:
             con.execute("DELETE FROM comps")
             con.execute("DELETE FROM media")
+            con.execute("DELETE FROM purchases")
             con.execute("DELETE FROM items")
             con.execute("DELETE FROM snapshots")
             con.execute("DELETE FROM deal_media")
@@ -1167,6 +1249,14 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                          int(ph.get("sort_order") or 0),
                          str(ph.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
                     )
+            for pu in it.get("purchases") or []:
+                con.execute(
+                    "INSERT OR REPLACE INTO purchases(id,item_id,price,qty,date,note) VALUES(?,?,?,?,?,?)",
+                    (str(pu.get("id") or nid()), iid, float(pu.get("price") or 0),
+                     max(1, int(pu.get("qty") or 1)),
+                     str(pu.get("date") or date.today().isoformat())[:10],
+                     str(pu.get("note", ""))[:200]),
+                )
         for s in data.get("snapshots") or []:
             con.execute(
                 "INSERT OR REPLACE INTO snapshots(d,value,invested) VALUES(?,?,?)",

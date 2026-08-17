@@ -512,6 +512,36 @@ function openSheet(html, cls){
 }
 function closeSheet(){ document.getElementById("overlay").innerHTML=""; openItem=null; }
 
+function purchasesBlock(item){
+  if((item.status||"owned")==="watch") return ""; // la veille n'a pas de prix d'achat à répartir
+  const lots = item.purchases || [];
+  const totalQty = lots.reduce((s,l)=>s+l.qty,0);
+  const totalCost = lots.reduce((s,l)=>s+l.price*l.qty,0);
+  const rows = [...lots].sort((a,b)=>a.date<b.date?1:-1).map(l=>`
+    <div class="comp">
+      <span class="p">${eur(l.price)}<span class="dim" style="font-weight:400;font-size:11px"> × ${l.qty}</span></span>
+      <span>${fr(l.date)}${l.note?` <span class="dim">· ${esc(l.note)}</span>`:""}</span>
+      <span class="w">${eur(l.price*l.qty)}</span>
+      <span><button class="x" data-del-purchase="${l.id}" title="Supprimer">✕</button></span>
+    </div>`).join("") ||
+    `<p class="note">Aucun détail : le prix d'achat unique du formulaire est utilisé (${eur(item.buy_price)} × ${item.qty}). Ajoute des prix différents ici si tu as payé certaines unités plus cher que d'autres (même item, même fiche).</p>`;
+  return `
+    <hr class="sep">
+    <span class="eyebrow">Prix d'achat détaillés${lots.length?` · ${totalQty} unité${totalQty>1?"s":""} · PRU moyen ${eur(totalCost/totalQty)}`:""}</span>
+    <div style="margin:8px 0 14px">${rows}</div>
+    <div class="f3">
+      <label><span class="lb">Prix payé</span><input id="p-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0,00"></label>
+      <label><span class="lb">Quantité</span><input id="p-qty" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
+      <label><span class="lb">Date</span><input id="p-date" type="date" value="${today()}"></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Note</span><input id="p-note" placeholder="facultatif (vendeur, lot…)"></label>
+      <div style="display:flex;align-items:flex-end;padding-bottom:12px">
+        <button class="btn" data-add-purchase="${item.id}" style="width:100%">Ajouter ce prix d'achat</button>
+      </div>
+    </div>`;
+}
+
 function itemSheet(id){
   const i = S.items.find(x=>x.id===id); if(!i) return;
   openItem = id;
@@ -588,6 +618,7 @@ function itemSheet(id){
       <div><span class="eyebrow">Investi</span><div class="num" style="font-size:17px">${eur(i.cost)}</div></div>
       <div><span class="eyebrow">Plus-value</span><div class="num ${d>=0?"gain":"loss"}" style="font-size:17px">${eur(i.value-i.cost)} · ${pct(d)}</div></div>
     </div>`}
+    ${purchasesBlock(i)}
     ${i.notes?`<p class="note">${esc(i.notes)}</p>`:""}
     <hr class="sep">
     <span class="eyebrow">Relevés de prix (${pts.length})</span>
@@ -631,10 +662,11 @@ function itemForm(id){
       <option value="watch" ${st==="watch"?"selected":""}>En veille — je surveille le prix</option>
     </select></label>
     <div class="f3">
-      <label><span class="lb">Quantité</span><input id="f-qty" type="number" inputmode="numeric" min="1" step="1" value="${i?.qty||1}"></label>
-      <label><span class="lb">Prix d'achat / u</span><input id="f-buy" type="number" inputmode="decimal" step="0.01" min="0" value="${i?.buy_price??""}"></label>
+      <label><span class="lb">Quantité</span><input id="f-qty" type="number" inputmode="numeric" min="1" step="1" value="${i?.qty||1}" ${i?.purchases?.length?"disabled":""}></label>
+      <label><span class="lb">Prix d'achat / u</span><input id="f-buy" type="number" inputmode="decimal" step="0.01" min="0" value="${i?.buy_price??""}" ${i?.purchases?.length?"disabled":""}></label>
       <label><span class="lb">Date d'achat</span><input id="f-date" type="date" value="${i?.buy_date||today()}"></label>
     </div>
+    ${i?.purchases?.length ? `<p class="note">Quantité et prix d'achat sont recalculés automatiquement depuis les prix d'achat détaillés (visibles dans la fiche item). Gère-les depuis là plutôt qu'ici.</p>` : ""}
     <label><span class="lb">Objectif d'achat (veille)</span><input id="f-target" type="number" inputmode="decimal" step="0.01" min="0"
       value="${i?.target_price||""}" placeholder="le prix auquel tu serais acheteur"></label>
     <label><span class="lb">Notes</span><textarea id="f-notes" rows="2" placeholder="Où acheté, état du carton, objectif de revente…">${esc(i?.notes||"")}</textarea></label>
@@ -926,6 +958,23 @@ document.addEventListener("click", async ev=>{
 
     const dc = t.closest("[data-del-comp]");
     if(dc){ await api("/api/comps/"+dc.dataset.delComp,{method:"DELETE"}); const k=openItem; await refresh(); return itemSheet(k); }
+
+    // --- Prix d'achat détaillés ---
+    const addp = t.closest("[data-add-purchase]");
+    if(addp){
+      const price = document.getElementById("p-price").value;
+      if(!(parseFloat(price)>0)) return document.getElementById("p-price").focus();
+      await api(`/api/items/${addp.dataset.addPurchase}/purchases`, {json:{price,
+        qty:document.getElementById("p-qty").value,
+        date:document.getElementById("p-date").value,
+        note:document.getElementById("p-note").value.trim()}});
+      await refresh(); return itemSheet(addp.dataset.addPurchase);
+    }
+    const delp = t.closest("[data-del-purchase]");
+    if(delp){
+      await api("/api/purchases/"+delp.dataset.delPurchase,{method:"DELETE"});
+      const k=openItem; await refresh(); return itemSheet(k);
+    }
 
     // --- Photos ---
     const dp = t.closest("[data-del-photo]");
