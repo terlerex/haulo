@@ -38,12 +38,20 @@ SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
     "cm_sold": ("Cardmarket — vente", 0.95),
     "gcc": ("Graded Card Center", 0.90),
+    # Vinted — vendu : vente conclue, prix DÉJÀ NET côté vendeur (pas de commission,
+    # la Protection Acheteur est facturée à l'acheteur). Ce point est central pour le
+    # calcul du net à la revente (chantier 5), pas pour l'estimation de valeur.
+    "vinted_sold": ("Vinted — vendu", 0.90),
     "cm_trend": ("Cardmarket — tendance", 0.80),
     "cm_low": ("Cardmarket — annonce", 0.45),
+    # Vinted — annonce : simple listing, souvent optimiste + concurrentiel, poids faible.
+    "vinted_listing": ("Vinted — annonce", 0.35),
     "index": ("Pokéindex / indice", 0.40),
     "manual": ("Estimation perso", 0.50),
 }
-SALE_SOURCES = {"ebay", "cm_sold", "gcc"}   # relevés qui prouvent une transaction
+# Sources qui prouvent une transaction réelle → alimentent le volume de ventes.
+# vinted_sold en fait partie ; vinted_listing NON (annonce n'est pas une vente).
+SALE_SOURCES = {"ebay", "cm_sold", "gcc", "vinted_sold"}
 DEFAULT_SETTINGS = {
     "halfLife": 60,
     "fees": 12.0,
