@@ -318,8 +318,12 @@ function renderRows(){
       <span class="right">Tendance 30j</span><span class="right">Ventes</span><span class="right">Objectif</span></div>`;
     host.innerHTML = head + list.map(i=>{
       const st = i.stats;
+      const thumb = (i.photos||[])[0];
       return `<div class="row watch item" data-open="${i.id}" tabindex="0" role="button">
-        <div class="name cell"><b>${esc(i.name)}</b><small>${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+        <div class="name cell" style="display:flex;align-items:center;gap:10px;min-width:0">
+          ${thumb?`<img src="${thumb.thumb_url}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:6px;flex-shrink:0">`:""}
+          <div style="min-width:0"><b>${esc(i.name)}</b><small style="display:block">${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+        </div>
         <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
         <div class="cell right num" data-l="Prix estimé"><b>${eur(i.est.value)}</b> <span class="pru-flag">${i.est.n}✓</span></div>
         <div class="cell right" data-l="Tendance 30j">${trendBadge(st.trend30)}</div>
@@ -334,8 +338,12 @@ function renderRows(){
     <span class="right">PRU</span><span class="right">Est. / u</span><span class="right">Valeur</span><span class="right">±</span></div>`;
   host.innerHTML = head + list.map(i=>{
     const d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
+    const thumb = (i.photos||[])[0];
     return `<div class="row item" data-open="${i.id}" tabindex="0" role="button">
-      <div class="name cell"><b>${esc(i.name)}</b><small>${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+      <div class="name cell" style="display:flex;align-items:center;gap:10px;min-width:0">
+        ${thumb?`<img src="${thumb.thumb_url}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:6px;flex-shrink:0">`:""}
+        <div style="min-width:0"><b>${esc(i.name)}</b><small style="display:block">${[i.set_name,i.lang,i.grade].filter(Boolean).map(esc).join(" · ")||"&nbsp;"}</small></div>
+      </div>
       <div class="cell" data-l="Type"><span class="tag t-${i.type}">${TYPES[i.type]}</span></div>
       <div class="cell right num" data-l="Qté">${i.qty}</div>
       <div class="cell right num dim" data-l="PRU">${eur(i.buy_price)}</div>
@@ -418,12 +426,33 @@ function itemSheet(id){
       <span><button class="x" data-toggle-comp="${c.id}" title="Ignorer / réintégrer">${c.excluded?"↺":"⦸"}</button><button class="x" data-del-comp="${c.id}" title="Supprimer">✕</button></span>
     </div>`).join("") || `<p class="note">Ajoute une vente eBay conclue, un prix tendance Cardmarket, une vente d'un groupe… chaque ligne pèse selon sa source et sa fraîcheur.</p>`;
 
+  const photosBlock = `
+    <div style="margin:12px 0 16px">
+      <span class="eyebrow">Photos (${(i.photos||[]).length}/8)</span>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center">
+        ${(i.photos||[]).map((p,idx)=>`
+          <div style="position:relative;width:72px;height:72px">
+            <a href="${p.url}" target="_blank" style="display:block;width:100%;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--line)">
+              <img src="${p.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
+            </a>
+            <button class="x" data-del-photo="${p.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px">✕</button>
+            ${idx>0?`<button class="x" data-photo-up="${p.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px">←</button>`:''}
+          </div>`).join("")}
+        ${(i.photos||[]).length < 8 ? `
+          <label style="width:72px;height:72px;display:flex;align-items:center;justify-content:center;border:1px dashed var(--line);border-radius:8px;cursor:pointer;color:var(--muted);font-size:22px;margin:0" title="Ajouter des photos">
+            +
+            <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple data-item="${i.id}" hidden>
+          </label>` : ''}
+      </div>
+      <p class="note" style="margin-top:6px">JPEG/PNG/WebP/HEIC · 10 Mo max · redimensionné auto en WebP.</p>
+    </div>`;
   openSheet(`
     <div class="sheet-head">
       <div><span class="eyebrow">${watch?"En veille · ":""}${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
         <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span></div>
       <button class="btn ghost" data-close-btn>Fermer</button>
     </div>
+    ${photosBlock}
     <div class="est">
       <div class="est-top">
         <div><span class="eyebrow">Prix de vente moyen estimé</span>
@@ -608,6 +637,23 @@ document.addEventListener("click", async ev=>{
     const dc = t.closest("[data-del-comp]");
     if(dc){ await api("/api/comps/"+dc.dataset.delComp,{method:"DELETE"}); const k=openItem; await refresh(); return itemSheet(k); }
 
+    // --- Photos ---
+    const dp = t.closest("[data-del-photo]");
+    if(dp){
+      if(!confirm("Supprimer cette photo ?")) return;
+      await api(`/api/items/${openItem}/photos/${dp.dataset.delPhoto}`,{method:"DELETE"});
+      await refresh(); return itemSheet(openItem);
+    }
+    const up = t.closest("[data-photo-up]");
+    if(up){
+      const item = S.items.find(x=>x.id===openItem); if(!item) return;
+      const ids = (item.photos||[]).map(p=>p.id);
+      const i0 = ids.indexOf(up.dataset.photoUp);
+      if(i0>0){ ids.splice(i0,1); ids.unshift(up.dataset.photoUp); }
+      await api(`/api/items/${openItem}/photos/order`,{method:"PUT", json:{order:ids}});
+      await refresh(); return itemSheet(openItem);
+    }
+
     if(t.closest("[data-save-settings]")){
       const weights = {};
       document.querySelectorAll("[data-w]").forEach(el=> weights[el.dataset.w] = el.value);
@@ -648,6 +694,24 @@ document.getElementById("file").addEventListener("change", async e=>{
   }catch(err){ alert("Import impossible : "+err.message); }
   finally{ e.target.value=""; }
 });
+// Upload de photos depuis la fiche item (le <input id="photo-file"> vit dans la sheet).
+// Delegation via document pour capturer les changes des inputs re-rendus.
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="photo-file") return;
+  const iid = e.target.dataset.item;
+  const files = Array.from(e.target.files||[]);
+  e.target.value = "";
+  if(!files.length || !iid) return;
+  try{
+    for(const f of files){
+      if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); continue; }
+      const fd = new FormData(); fd.append("file", f);
+      await api(`/api/items/${iid}/photos`,{method:"POST", body:fd});
+    }
+    await refresh(); return itemSheet(iid);
+  }catch(err){ alert("Upload impossible : "+err.message); }
+});
+
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden && !document.querySelector(".sheet")) refresh(); });
 
 refresh();

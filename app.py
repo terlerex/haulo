@@ -28,11 +28,15 @@ from fastapi import Body, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import media as media_mod
+
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
 PASSWORD = os.environ.get("PORTFOLIO_PASSWORD", "").strip()
 SESSION_DAYS = int(os.environ.get("SESSION_DAYS", "90"))
 COOKIE = "pkmn_session"
+
+MEDIA = media_mod.media_dir(DB)  # <dossier DB>/media, jamais /data en dur
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -101,6 +105,17 @@ def init() -> None:
                 d TEXT PRIMARY KEY, value REAL NOT NULL, invested REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS media(
+                id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,        -- <uuid>.webp
+                mime TEXT NOT NULL DEFAULT 'image/webp',
+                size_bytes INTEGER NOT NULL,
+                width INTEGER, height INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS media_item ON media(item_id, sort_order);
             """
         )
         migrate(con)
@@ -328,6 +343,10 @@ def load_items() -> list[dict]:
     with db() as con:
         items = [dict(r) for r in con.execute("SELECT * FROM items")]
         comps = [dict(r) for r in con.execute("SELECT * FROM comps ORDER BY date DESC")]
+        photos = [dict(r) for r in con.execute(
+            "SELECT id, item_id, filename, mime, size_bytes, width, height, sort_order, created_at "
+            "FROM media ORDER BY item_id, sort_order, created_at"
+        )]
     by_item: dict[str, list] = {}
     for c in comps:
         c["excluded"] = bool(c["excluded"])
@@ -336,8 +355,14 @@ def load_items() -> list[dict]:
         # N'est PAS utilisé par estimate() qui reste sur price seul.
         c["total"] = float(c["price"]) + c["shipping"]
         by_item.setdefault(c["item_id"], []).append(c)
+    photos_by_item: dict[str, list] = {}
+    for p in photos:
+        p["url"] = f"/api/items/{p['item_id']}/photos/{p['id']}"
+        p["thumb_url"] = f"/api/items/{p['item_id']}/photos/{p['id']}/thumb"
+        photos_by_item.setdefault(p["item_id"], []).append(p)
     for it in items:
         it["comps"] = by_item.get(it["id"], [])
+        it["photos"] = photos_by_item.get(it["id"], [])
     return items
 
 
@@ -486,7 +511,9 @@ def api_edit_item(iid: str, p: dict = Body(...)):
 def api_del_item(iid: str):
     with db() as con:
         con.execute("DELETE FROM comps WHERE item_id=?", (iid,))
+        con.execute("DELETE FROM media WHERE item_id=?", (iid,))
         con.execute("DELETE FROM items WHERE id=?", (iid,))
+    media_mod.delete_item_dir(MEDIA, iid)   # efface aussi les fichiers physiques
     return {"ok": True}
 
 
@@ -590,22 +617,161 @@ def api_snapshot():
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------- photos
+
+@app.post("/api/items/{iid}/photos")
+async def api_add_photo(iid: str, file: UploadFile = File(...)):
+    """Upload une photo pour un item. Vérifie taille + type + limite 8 photos."""
+    with db() as con:
+        if not con.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(404, "item introuvable")
+        n = con.execute("SELECT COUNT(*) AS n FROM media WHERE item_id=?", (iid,)).fetchone()["n"]
+    if n >= media_mod.MAX_PHOTOS_PER_ITEM:
+        raise HTTPException(400, f"limite atteinte : {media_mod.MAX_PHOTOS_PER_ITEM} photos par item")
+
+    raw = await file.read()
+    try:
+        info = media_mod.save_photo(MEDIA, iid, raw, (file.content_type or "").strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        # sort_order = fin de liste : max + 1 (première photo = 0, sert de vignette)
+        maxo = con.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM media WHERE item_id=?",
+            (iid,),
+        ).fetchone()["m"]
+        con.execute(
+            "INSERT INTO media(id,item_id,filename,mime,size_bytes,width,height,sort_order,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (info["id"], iid, info["filename"], "image/webp",
+             info["size_bytes"], info["width"], info["height"], maxo + 1, now),
+        )
+    return {
+        "id": info["id"],
+        "url": f"/api/items/{iid}/photos/{info['id']}",
+        "thumb_url": f"/api/items/{iid}/photos/{info['id']}/thumb",
+        "sort_order": maxo + 1,
+    }
+
+
+@app.delete("/api/items/{iid}/photos/{pid}")
+def api_del_photo(iid: str, pid: str):
+    with db() as con:
+        row = con.execute(
+            "SELECT id FROM media WHERE item_id=? AND id=?", (iid, pid),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "photo introuvable")
+        con.execute("DELETE FROM media WHERE id=?", (pid,))
+    media_mod.delete_photo(MEDIA, iid, pid)
+    return {"ok": True}
+
+
+@app.put("/api/items/{iid}/photos/order")
+def api_reorder_photos(iid: str, p: dict = Body(...)):
+    """Réordonne les photos d'un item. body: {order: [pid, pid, ...]}"""
+    order = p.get("order")
+    if not isinstance(order, list):
+        raise HTTPException(400, "order doit être une liste")
+    with db() as con:
+        rows = {r["id"] for r in con.execute("SELECT id FROM media WHERE item_id=?", (iid,))}
+        # Ignore silencieusement les ids inconnus, applique l'ordre pour les autres.
+        for i, pid in enumerate(order):
+            if pid in rows:
+                con.execute("UPDATE media SET sort_order=? WHERE id=?", (i, pid))
+    return {"ok": True}
+
+
+@app.get("/api/items/{iid}/photos/{pid}")
+def api_get_photo(iid: str, pid: str):
+    """Sert l'original de la photo. Protégé par le middleware auth global."""
+    path = media_mod.photo_path(MEDIA, iid, pid, thumb=False)
+    if not path:
+        raise HTTPException(404, "photo introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+@app.get("/api/items/{iid}/photos/{pid}/thumb")
+def api_get_thumb(iid: str, pid: str):
+    """Sert la vignette 400 px de la photo."""
+    path = media_mod.photo_path(MEDIA, iid, pid, thumb=True)
+    if not path:
+        raise HTTPException(404, "vignette introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+# --------------------------------------------------------------------------- export
+
 @app.get("/api/export")
 def api_export():
     st = build_state(snapshot=False)
     return {"items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"]}
 
 
+@app.get("/api/export.zip")
+def api_export_zip():
+    """Export complet : data.json + tous les fichiers media dans un ZIP."""
+    import io, zipfile
+    st = build_state(snapshot=False)
+    payload = {"items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"]}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("data.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        for it in st["items"]:
+            for f in media_mod.list_item_files(MEDIA, it["id"]):
+                # Chemin relatif dans le ZIP : media/<item_id>/<filename>
+                z.write(f, arcname=f"media/{it['id']}/{f.name}")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="portefeuille.zip"'},
+    )
+
+
 @app.post("/api/import")
 async def api_import(file: UploadFile = File(...), replace: bool = True):
-    """Accepte l'export de la version fichier unique comme celui du serveur."""
-    data: Any = json.loads((await file.read()).decode("utf-8"))
+    """Accepte l'export de la version fichier unique comme celui du serveur.
+
+    Détecte automatiquement si le fichier est un JSON pur ou un ZIP :
+    - ZIP → contient data.json + un dossier media/<item_id>/*.webp
+    - JSON → import sans médias (les entrées photos sont ignorées côté fichiers)
+    """
+    raw = await file.read()
+
+    import io, zipfile
+
+    zip_photos: dict[str, dict[str, bytes]] = {}   # {item_id: {filename: bytes}}
+    if raw[:4] == b"PK\x03\x04":  # signature ZIP
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                try:
+                    data_bytes = z.read("data.json")
+                except KeyError:
+                    raise HTTPException(400, "ZIP sans data.json")
+                data: Any = json.loads(data_bytes.decode("utf-8"))
+                for name in z.namelist():
+                    # media/<item_id>/<filename>
+                    parts = name.split("/")
+                    if len(parts) == 3 and parts[0] == "media" and parts[2]:
+                        iid, fname = parts[1], parts[2]
+                        zip_photos.setdefault(iid, {})[fname] = z.read(name)
+        except zipfile.BadZipFile:
+            raise HTTPException(400, "ZIP invalide")
+    else:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "format inattendu (ni JSON ni ZIP)")
+
     items = data.get("items")
     if not isinstance(items, list):
         raise HTTPException(400, "format inattendu")
     with db() as con:
         if replace:
             con.execute("DELETE FROM comps")
+            con.execute("DELETE FROM media")
             con.execute("DELETE FROM items")
             con.execute("DELETE FROM snapshots")
         for it in items:
@@ -627,6 +793,32 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                      max(1, int(c.get("sold_count") or 1)),
                      max(0.0, float(c.get("shipping") or 0))),
                 )
+            # Photos : ne restaure les entrées DB que si les fichiers sont là (ZIP).
+            # Sinon (import JSON pur) on ignore silencieusement pour ne pas créer
+            # des références orphelines vers des fichiers inexistants.
+            files_for_item = zip_photos.get(iid, {})
+            for ph in it.get("photos") or []:
+                fname = ph.get("filename") or ""
+                if fname and fname in files_for_item:
+                    # Écrit le fichier sur disque avant l'INSERT DB
+                    d = MEDIA / iid
+                    d.mkdir(parents=True, exist_ok=True)
+                    (d / fname).write_bytes(files_for_item[fname])
+                    # La vignette peut être présente aussi
+                    pid = fname.removesuffix(".webp")
+                    thumb_name = f"{pid}.thumb.webp"
+                    if thumb_name in files_for_item:
+                        (d / thumb_name).write_bytes(files_for_item[thumb_name])
+                    con.execute(
+                        "INSERT OR REPLACE INTO media(id,item_id,filename,mime,size_bytes,width,height,sort_order,created_at)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
+                        (str(ph.get("id") or pid), iid, fname,
+                         str(ph.get("mime", "image/webp")),
+                         int(ph.get("size_bytes") or len(files_for_item[fname])),
+                         ph.get("width"), ph.get("height"),
+                         int(ph.get("sort_order") or 0),
+                         str(ph.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+                    )
         for s in data.get("snapshots") or []:
             con.execute(
                 "INSERT OR REPLACE INTO snapshots(d,value,invested) VALUES(?,?,?)",
