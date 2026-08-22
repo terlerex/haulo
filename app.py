@@ -332,6 +332,8 @@ def put_card_settings(p: dict) -> dict:
                     current[k][kk] = _num(vv, current[k][kk])
         elif k == "japan_lot_size":
             current[k] = int(_num(v, current[k]))
+        elif k == "profit_target_pct":
+            current[k] = max(0.0, _num(v, current[k]))  # <=-100% ferait planter cost_max (division par ~0)
         else:
             current[k] = _num(v, current.get(k, v))
     with db() as con:
@@ -1246,7 +1248,7 @@ def clean_card_sheet(p: dict) -> dict:
         "grade": str(p.get("grade", ""))[:40],
         "lang": str(p.get("lang", ""))[:10],
         "set_name": str(p.get("set_name", ""))[:120],
-        "profit_target_pct": numopt("profit_target_pct"),
+        "profit_target_pct": (max(0.0, numopt("profit_target_pct")) if numopt("profit_target_pct") is not None else None),
         "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else "ebay",
         "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
         "resale_min": numopt("resale_min"),
@@ -1272,7 +1274,11 @@ def _card_sheet_view(row: dict, items_by_id: dict, card_settings: dict, fx_rate:
         comps = items_by_id.get(d["item_id"], {}).get("comps", []) if d["item_id"] else []
         resale_stats = card_deals_mod.resale_range_from_comps(comps)
         resale_stats["manual"] = False
-    sheet_for_calc = {**d, "profit_target_pct": d["profit_target_pct"] or card_settings["profit_target_pct"]}
+    # "is not None", pas "or" : un objectif explicitement mis à 0% (seuil de
+    # rentabilité) est une valeur légitime, pas une absence de valeur — "or"
+    # la confondrait avec None/vide et la remplacerait silencieusement par le défaut.
+    pt = d["profit_target_pct"]
+    sheet_for_calc = {**d, "profit_target_pct": pt if pt is not None else card_settings["profit_target_pct"]}
     computed = card_deals_mod.build_card_sheet_view(sheet_for_calc, listings, card_settings, resale_stats, fx_rate=fx_rate)
     d["listings"] = computed.pop("listings")
     d["computed"] = computed

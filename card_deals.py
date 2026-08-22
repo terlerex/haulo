@@ -142,8 +142,15 @@ def cost_max(net: float, profit_target_pct: float) -> float:
     """C_max = N / (1+m) : coût de revient total maximum acceptable pour
     respecter l'objectif de bénéfice m (%, sur le COÛT, pas sur le prix de
     vente — 30% veut dire "je récupère 130% de ce que j'ai investi"), pas
-    l'inverse (erreur classique : confondre marge sur coût et marge sur prix)."""
-    return net / (1 + profit_target_pct / 100)
+    l'inverse (erreur classique : confondre marge sur coût et marge sur prix).
+
+    Garde-fou : un objectif <= -100% n'a pas de sens (division par zéro ou
+    négative) — sans ce plancher, une saisie malheureuse dans une seule fiche
+    ferait planter tout /api/card-deals (donc tout l'onglet Achat-revente)."""
+    denom = 1 + profit_target_pct / 100
+    if denom <= 0:
+        denom = 0.01
+    return net / denom
 
 
 def buy_max(platform: str, c_max: float, buy_fees: dict, import_params: dict,
@@ -217,7 +224,8 @@ def build_card_sheet_view(sheet: dict, listings: list[dict], settings: dict,
     """Vue complète d'une fiche carte : C_max prudent/optimiste, prix d'achat
     max par plateforme (les 4), et confrontation de chaque annonce suivie."""
     sell_fee = settings["sell_fees"].get(sheet["resale_platform"], {})
-    m = float(sheet.get("profit_target_pct") or settings["profit_target_pct"])
+    pt = sheet.get("profit_target_pct")  # "is not None", pas "or" : 0% (seuil de rentabilité) est légitime
+    m = float(pt if pt is not None else settings["profit_target_pct"])
     e = float(sheet.get("resale_shipping_cost") or 0) + float(sheet.get("packaging_cost") or 0)
 
     p25 = resale_stats.get("p25")
