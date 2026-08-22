@@ -244,8 +244,9 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       <input class="search" id="search" type="search" placeholder="Rechercher…" aria-label="Rechercher un item">
     </div>
     <div class="filters" id="deal-toolbar" style="display:none">
-      <button class="btn primary" data-action="new-deal">+ Nouvelle opération</button>
-      <button class="btn ghost" data-action="deal-settings">Paramètres</button>
+      <button class="btn primary" data-action="new-card-sheet">+ Fiche carte</button>
+      <button class="btn primary" data-action="new-import-order">+ Import Japon</button>
+      <button class="btn ghost" data-action="card-settings">Paramètres</button>
     </div>
 
     <div class="list" id="rows"></div>
@@ -263,12 +264,12 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 const TYPES = {scelle:"Scellé", loose:"Loose", gradee:"Gradée"};
 const TYPE_EMOJI = {scelle:"📦", loose:"🃏", gradee:"🏆"};
 let S = null, filter = "all", query = "", openItem = null, mode = "owned";
-let deals = null, dealParams = null;
-const SELL_PLATFORMS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
+let cardDeals = null, openSheetId = null, openOrderId = null;
+const BUY_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket", japan:"Proxy Japon"};
+const SELL_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
 
-async function loadDeals(){
-  const r = await api("/api/deals");
-  deals = r.deals; dealParams = r.params;
+async function loadCardDeals(){
+  cardDeals = await api("/api/card-deals");
 }
 
 /* ---------------- accès API ---------------- */
@@ -351,64 +352,64 @@ function thumbOf(entity){
   return TYPE_EMOJI[entity.type] || "📦";
 }
 
-function renderDeals(){
+function cardSheetBadge(){ return `<span class="tag t-gradee">🃏 Fiche carte</span>`; }
+function importOrderBadge(){ return `<span class="tag t-scelle">📦 Import Japon</span>`; }
+
+function renderCardDeals(){
   const host = document.getElementById("rows");
-  if(!Array.isArray(deals)){ host.innerHTML = `<div class="empty">Chargement…</div>`; return; }
-  if(!deals.length){
-    host.innerHTML = `<div class="empty"><b>Aucune opération</b>
-      Décris un achat en cours (lot ou carte isolée) pour voir le bénéfice net et le prix plancher par plateforme avant de te décider.
-      <div style="margin-top:14px"><button class="btn primary" data-action="new-deal">+ Nouvelle opération</button></div></div>`;
+  if(!cardDeals){ host.innerHTML = `<div class="empty">Chargement…</div>`; return; }
+  const sheets = cardDeals.card_sheets||[], orders = cardDeals.import_orders||[];
+  if(!sheets.length && !orders.length){
+    host.innerHTML = `<div class="empty"><b>Aucune fiche</b>
+      Pars d'une carte et d'un objectif de bénéfice pour connaître ton prix d'achat max, ou décris une commande d'import Japon pour en calculer le coût réel.
+      <div style="margin-top:14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button class="btn primary" data-action="new-card-sheet">+ Fiche carte</button>
+        <button class="btn primary" data-action="new-import-order">+ Import Japon</button>
+      </div></div>`;
     return;
   }
-  host.innerHTML = deals.map(d=>{
-    const c = d.computed, best = c.best;
-    const name = d.item_id ? (S.items.find(i=>i.id===d.item_id)?.name || d.name || "Item lié") : (d.name || "Sans nom");
-    const doneTag = d.status==="done" ? `<span class="tag" style="color:var(--accent);border-color:rgba(62,220,123,.35);margin-left:6px">Réalisée</span>` : "";
-    const detail = c.results.length ? `
-      <details style="margin-top:10px">
-        <summary class="eyebrow" style="cursor:pointer">Détail du calcul</summary>
-        <div style="margin-top:8px;font-size:13px">
-          <div class="dim" style="margin-bottom:4px">Coût de revient débarqué</div>
-          <div class="comp" style="grid-template-columns:1fr auto"><span>Prix article + port</span><span class="p">${eur(c.cost.lot_price+c.cost.lot_shipping)}</span></div>
-          ${c.cost.is_import?`
-          <div class="comp" style="grid-template-columns:1fr auto"><span>TVA import (${c.cost.vat_rate_pct}%)</span><span class="p">${eur(c.cost.vat_import)}</span></div>
-          <div class="comp" style="grid-template-columns:1fr auto"><span>Douane (${c.cost.duty_rate_pct}%)</span><span class="p">${eur(c.cost.duty)}</span></div>
-          <div class="comp" style="grid-template-columns:1fr auto"><span>Frais de dossier${c.cost.is_ioss?" (neutralisés IOSS)":""}</span><span class="p">${eur(c.cost.carrier_fee)}</span></div>`:""}
-          <div class="comp" style="grid-template-columns:1fr auto"><span><b>Total lot</b></span><span class="p"><b>${eur(c.cost.total_lot)}</b></span></div>
-          <div class="comp" style="grid-template-columns:1fr auto"><span><b>Coût / unité (${c.cost.qty})</b></span><span class="p"><b>${eur(c.cost.per_unit)}</b></span></div>
-          <div class="dim" style="margin:10px 0 4px">Net par plateforme</div>
-          ${c.results.map(r=>`
-            <div class="comp" style="grid-template-columns:1fr auto">
-              <span>${esc(r.label)} — vente ${eur(r.price)}${r.commission?`, commission ${eur(r.commission)}`:""}${r.shipping_out?`, port ${eur(r.shipping_out)}`:""}${r.packaging?`, emballage ${eur(r.packaging)}`:""}</span>
-              <span class="p ${r.benefice>=0?"gain":"loss"}">${eur(r.net)}</span>
-            </div>
-            <div class="dim" style="font-size:11px;margin:-4px 0 6px">bénéfice ${eur(r.benefice)} (${pct(r.benefice_pct)}) · plancher ${eur(r.floor_price)}</div>
-          `).join("")}
+  const rows = [
+    ...sheets.map(s=>({...s, _kind:"sheet"})),
+    ...orders.map(o=>({...o, _kind:"order"})),
+  ].sort((a,b)=> (b.created_at||"").localeCompare(a.created_at||""));
+
+  host.innerHTML = rows.map(r=>{
+    if(r._kind==="sheet"){
+      const name = r.item_name || r.name || "Fiche sans nom";
+      const prudent = r.computed.scenarios.prudent;
+      const doneTag = r.status==="done" ? `<span class="tag" style="color:var(--accent);border-color:rgba(62,220,123,.35);margin-left:6px">Réalisée</span>`
+        : r.status==="archived" ? `<span class="tag dim" style="margin-left:6px">Archivée</span>` : "";
+      const nFail = (r.listings||[]).filter(l=>l.verdict===false).length;
+      return `<button class="card-item" data-open-sheet="${r.id}">
+        <div class="card-thumb">🃏</div>
+        <div class="card-body">
+          <div class="card-title-row"><span class="card-title">${esc(name)}</span>
+            <span class="card-value">${prudent?eur(prudent.c_max):"—"}</span></div>
+          <div class="card-sub-row">
+            <span>${cardSheetBadge()}${doneTag} · objectif ${r.computed.profit_target_pct}%</span>
+            <span class="r">${r.listings.length?`${r.listings.length} annonce${r.listings.length>1?"s":""}${nFail?`, ${nFail} au-dessus`:""}`:"—"}</span>
+          </div>
         </div>
-      </details>` : `<p class="note">Ajoute un prix de revente visé (eBay, Vinted ou Cardmarket) pour voir le bénéfice.</p>`;
-    return `<div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
-        <div><b style="font-size:14.5px">${esc(name)}</b>${doneTag}
-          <div class="dim" style="font-size:12px;margin-top:2px">Achat ${esc(d.platform)} · ${d.qty} u · coût de revient ${eur(c.cost.per_unit)}/u</div>
-        </div>
-        <div style="text-align:right">
-          ${best ? `<div class="num ${best.benefice>=0?"gain":"loss"}" style="font-size:17px;font-weight:700">${eur(best.benefice)}</div>
-            <div class="dim" style="font-size:11px">${esc(best.label)} · ${pct(best.benefice_pct)}</div>`
-            : `<div class="dim" style="font-size:12px">pas de revente visée</div>`}
+      </button>`;
+    }
+    const c = r.computed;
+    const statusLbl = {brouillon:"Brouillon", commandee:"Commandée", recue:"Reçue"}[r.status]||r.status;
+    return `<button class="card-item" data-open-order="${r.id}">
+      <div class="card-thumb">📦</div>
+      <div class="card-body">
+        <div class="card-title-row"><span class="card-title">${esc(r.name||"Commande sans nom")}</span>
+          <span class="card-value ${c.profit_total_eur>=0?'gain':'loss'}">${eur(c.profit_total_eur)}</span></div>
+        <div class="card-sub-row">
+          <span>${importOrderBadge()} · ${statusLbl} · ${r.lines.length} carte${r.lines.length>1?"s":""}</span>
+          <span class="r ${c.n_flagged?'loss':'dim'}">${c.margin_pct!=null?pct(c.margin_pct):"—"}${c.n_flagged?` · ${c.n_flagged} sous seuil`:""}</span>
         </div>
       </div>
-      ${detail}
-      <div class="actions" style="margin-top:10px">
-        <button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>
-        <button class="btn" data-edit-deal="${d.id}">Modifier</button>
-        ${d.status!=="done" ? `<button class="btn primary" data-realize-deal="${d.id}">Marquer réalisée</button>` : ""}
-      </div>
-    </div>`;
+    </button>`;
   }).join("");
 }
 
 function renderRows(){
-  if(mode==="deals") return renderDeals();
+  if(mode==="deals") return renderCardDeals();
   const host = document.getElementById("rows");
   const pool = S.items.filter(i => (i.status||"owned")===mode);
   document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
@@ -719,113 +720,324 @@ function settingsForm(){
   `,"center");
 }
 
-function dealPhotosBlock(d){
-  const photos = d?.photos || [];
-  if(!d) return "";
-  return `
-    <div style="margin:12px 0 4px">
-      <span class="eyebrow">Photos (${photos.length}/8)</span>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center">
-        ${photos.map((p,idx)=>`
-          <div style="position:relative;width:64px;height:64px">
-            <a href="${p.url}" target="_blank" style="display:block;width:100%;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--line)">
-              <img src="${p.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
-            </a>
-            <button class="x" data-del-deal-photo="${p.id}" data-deal-owner="${d.id}" title="Supprimer" style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✕</button>
-            ${idx>0?`<button class="x" data-deal-photo-up="${p.id}" data-deal-owner="${d.id}" title="Vers le début" style="position:absolute;bottom:-6px;left:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">←</button>`:''}
-          </div>`).join("")}
-        ${photos.length < 8 ? `
-          <label style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;border:1px dashed var(--line);border-radius:8px;cursor:pointer;color:var(--muted);font-size:20px;margin:0" title="Ajouter des photos">
-            +
-            <input id="deal-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple data-deal="${d.id}" hidden>
-          </label>` : ''}
-      </div>
-    </div>`;
+function cardSheetRow(row){
+  const jpy = row.displayed_jpy!=null ? ` <span class="dim" style="font-size:11px">(≈ ${Math.round(row.displayed_jpy).toLocaleString('fr-FR')} ¥)</span>`
+    : (row.platform==='japan' ? ' <span class="dim" style="font-size:11px">(taux indisponible)</span>' : '');
+  return `<div class="comp" style="grid-template-columns:1fr auto auto">
+    <span>${esc(BUY_PLATFORM_LABELS[row.platform]||row.platform)}</span>
+    <span class="p">${eur(row.displayed)}${jpy}</span>
+    <span class="w">tout compris ${eur(row.all_in)}</span>
+  </div>`;
 }
 
-function dealForm(id){
-  const d = id ? deals.find(x=>x.id===id) : null;
-  const rp = d?.resale_prices || {};
+function scenarioBlock(sc, title){
+  if(!sc) return `<p class="note">${title} : fourchette de revente manquante, calcul impossible.</p>`;
+  return `<div style="margin:10px 0 6px">
+    <div class="est-top" style="margin-bottom:8px">
+      <span class="eyebrow">${title} — revente visée ${eur(sc.resale_price)}</span>
+      <span class="num" style="font-weight:650">${eur(sc.c_max)}</span>
+    </div>
+    ${sc.rows.map(cardSheetRow).join("")}
+    <details style="margin-top:8px">
+      <summary class="eyebrow" style="cursor:pointer">Détail du calcul</summary>
+      <div style="margin-top:8px;font-size:13px">
+        <div class="comp" style="grid-template-columns:1fr auto"><span>Prix de revente</span><span class="p">${eur(sc.resale_price)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>− Commission plateforme de revente</span><span class="p">${eur(sc.net.commission)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>− Mon envoi + emballage</span><span class="p">${eur(sc.net.my_shipping_cost)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span><b>= Net encaissé</b></span><span class="p"><b>${eur(sc.net.net)}</b></span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span><b>÷ (1 + objectif de bénéfice)</b></span><span class="p"></span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span><b>= Coût de revient max</b></span><span class="p"><b>${eur(sc.c_max)}</b></span></div>
+      </div>
+    </details>
+  </div>`;
+}
+
+function cardSheetListingsBlock(sheet){
+  const listings = sheet.listings||[];
+  const rows = listings.map(l=>`
+    <div class="comp" style="grid-template-columns:auto 1fr auto auto">
+      <span class="p">${eur(l.price)}${l.shipping?`<span class="dim" style="font-weight:400;font-size:11px"> +${eur(l.shipping)} port</span>`:""}</span>
+      <span>${esc(BUY_PLATFORM_LABELS[l.platform]||l.platform)}${l.url?` · <a href="${esc(l.url)}" target="_blank" style="color:var(--muted)">lien</a>`:""}</span>
+      <span class="${l.verdict===false?'loss':l.verdict===true?'gain':'dim'}" style="font-size:12px">${l.verdict==null?"—":l.verdict?`OK · ${eur(l.gap)}`:`échec · ${eur(l.gap)}`}</span>
+      <span><button class="x" data-del-listing="${l.id}" data-sheet="${sheet.id}" title="Supprimer">✕</button></span>
+    </div>`).join("") || `<p class="note">Aucune annonce suivie pour l'instant.</p>`;
+  return `<hr class="sep"><span class="eyebrow">Annonces suivies (confrontées au seuil prudent)</span>
+    <div style="margin:8px 0 14px">${rows}</div>
+    <div class="f3">
+      <label><span class="lb">Plateforme</span><select id="l-platform">
+        ${Object.entries(BUY_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}">${l}</option>`).join("")}
+      </select></label>
+      <label><span class="lb">Prix affiché</span><input id="l-price" type="number" step="0.01" min="0" placeholder="0,00"></label>
+      <label><span class="lb">Port</span><input id="l-shipping" type="number" step="0.01" min="0" value="0"></label>
+    </div>
+    <label><span class="lb">Lien (facultatif)</span><input id="l-url" placeholder="https://…"></label>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" data-add-listing="${sheet.id}">Ajouter l'annonce</button></div>`;
+}
+
+function cardSheetSheet(id){
+  const s = id ? cardDeals.card_sheets.find(x=>x.id===id) : null;
+  openSheetId = id;
+  const resaleStats = s?.computed?.resale_stats;
   openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">${d?"Modifier":"Nouvelle"} opération</span>
-      <h2>${d?esc(d.name||"Opération"):"Achat-revente"}</h2></div>
+    <div class="sheet-head"><div><span class="eyebrow">${s?"Fiche carte":"Nouvelle"}</span>
+      <h2>${s?esc(s.item_name||s.name||"Fiche"):"Fiche carte"}</h2></div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
 
     <label><span class="lb">Item lié (optionnel)</span>
-      <select id="d-item">
+      <select id="cs-item">
         <option value="">— Saisie libre —</option>
-        ${(S?.items||[]).map(i=>`<option value="${i.id}" ${d?.item_id===i.id?"selected":""}>${esc(i.name)}</option>`).join("")}
+        ${(S?.items||[]).map(i=>`<option value="${i.id}" ${s?.item_id===i.id?"selected":""}>${esc(i.name)}</option>`).join("")}
       </select>
     </label>
     <div class="f2">
-      <label><span class="lb">Nom (si pas de lien)</span><input id="d-name" value="${esc(d?.name||"")}" placeholder="Lot 10 cartes SV Japon"></label>
-      <label><span class="lb">Type</span><select id="d-type">
-        ${Object.entries(TYPES).map(([k,l])=>`<option value="${k}" ${d?.type===k?"selected":""}>${l}</option>`).join("")}
+      <label><span class="lb">Nom (si pas de lien)</span><input id="cs-name" value="${esc(s?.name||"")}" placeholder="Dracaufeu ex"></label>
+      <label><span class="lb">Type</span><select id="cs-type">
+        <option value="loose" ${s?.type==="loose"?"selected":""}>Loose</option>
+        <option value="gradee" ${s?.type==="gradee"?"selected":""}>Gradée</option>
       </select></label>
     </div>
     <div class="f3">
-      <label><span class="lb">Langue</span><input id="d-lang" value="${esc(d?.lang||"")}" placeholder="JP"></label>
-      <label><span class="lb">Grade</span><input id="d-grade" value="${esc(d?.grade||"")}" placeholder="facultatif"></label>
-      <label><span class="lb">Plateforme d'achat</span><select id="d-platform">
-        ${["vinted","ebay","cardmarket","japan_proxy","autre"].map(p=>`<option value="${p}" ${d?.platform===p?"selected":""}>${p}</option>`).join("")}
-      </select></label>
+      <label><span class="lb">Grade</span><input id="cs-grade" value="${esc(s?.grade||"")}" placeholder="PSA 10"></label>
+      <label><span class="lb">Langue</span><input id="cs-lang" value="${esc(s?.lang||"")}" placeholder="JP"></label>
+      <label><span class="lb">Set</span><input id="cs-set" value="${esc(s?.set_name||"")}" placeholder="EV02"></label>
     </div>
     <hr class="sep">
-    <div class="f3">
-      <label><span class="lb">Prix du lot (total)</span><input id="d-price" type="number" step="0.01" min="0" value="${d?.lot_price??""}"></label>
-      <label><span class="lb">Port (achat)</span><input id="d-ship" type="number" step="0.01" min="0" value="${d?.lot_shipping??0}"></label>
-      <label><span class="lb">Quantité (lot)</span><input id="d-qty" type="number" min="1" step="1" value="${d?.qty??1}"></label>
+    <div class="f2">
+      <label><span class="lb">Objectif de bénéfice (%)</span><input id="cs-target" type="number" step="0.5" min="0"
+        value="${s?.profit_target_pct??""}" placeholder="${cardDeals.settings.profit_target_pct}"></label>
+      <label><span class="lb">Plateforme de revente visée</span><select id="cs-resale-platform">
+        ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${(s?.resale_platform||"ebay")===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
     </div>
-    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-import" ${d?.is_import?"checked":""} style="width:auto;min-height:auto"> <span>Achat hors UE (déclenche TVA + douane)</span></label>
-    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-ioss" ${d?.is_ioss?"checked":""} style="width:auto;min-height:auto"> <span>Sous IOSS (&lt; ${dealParams?.ioss_threshold??150}€, TVA déjà payée à l'achat)</span></label>
-    <label><span class="lb">Répartition du coût sur le lot</span><select id="d-split">
-      <option value="value" ${d?.split_mode!=="equal"?"selected":""}>Au prorata de la valeur</option>
-      <option value="equal" ${d?.split_mode==="equal"?"selected":""}>Parts égales</option>
+    <div class="f2">
+      <label><span class="lb">Mon envoi (revente)</span><input id="cs-ship" type="number" step="0.01" min="0" value="${s?.resale_shipping_cost??0}"></label>
+      <label><span class="lb">Emballage</span><input id="cs-pack" type="number" step="0.01" min="0" value="${s?.packaging_cost??0}"></label>
+    </div>
+    <label><span class="lb">Fourchette de revente</span><select id="cs-mode">
+      <option value="auto" ${s?.resale_mode!=="manual"?"selected":""}>Automatique — relevés de l'item lié (P25/médiane/P75, 90j)</option>
+      <option value="manual" ${s?.resale_mode==="manual"?"selected":""}>Manuelle</option>
     </select></label>
-    <p class="note">Avec un seul prix pour tout le lot, les deux modes donnent le même coût par unité. La distinction ne jouera que le jour où tu détailleras un prix de revente différent par carte du lot.</p>
+    <div class="f3" id="cs-manual-range" style="${s?.resale_mode==="manual"?"":"display:none"}">
+      <label><span class="lb">P25 (bas)</span><input id="cs-min" type="number" step="0.01" min="0" value="${s?.resale_min??""}"></label>
+      <label><span class="lb">Médiane</span><input id="cs-median" type="number" step="0.01" min="0" value="${s?.resale_median??""}"></label>
+      <label><span class="lb">P75 (haut)</span><input id="cs-max" type="number" step="0.01" min="0" value="${s?.resale_max??""}"></label>
+    </div>
+    ${s && s.resale_mode!=="manual" ? `<p class="note">${resaleStats?.n ? `${resaleStats.n} relevé(s) sur 90 jours : P25 ${eur(resaleStats.p25)} · médiane ${eur(resaleStats.median)} · P75 ${eur(resaleStats.p75)}` : "Pas assez de relevés sur l'item lié pour calculer une fourchette : lie un item avec des relevés, ou passe en manuel."}</p>` : ""}
+    <label><span class="lb">Notes</span><textarea id="cs-notes" rows="2">${esc(s?.notes||"")}</textarea></label>
+
+    ${s ? `<hr class="sep">
+      <span class="eyebrow">Prudent (P25) — décision</span>
+      ${scenarioBlock(s.computed.scenarios.prudent, "Prudent")}
+      <details><summary class="eyebrow" style="cursor:pointer">Voir le scénario optimiste (P75, informatif — jamais à dépasser)</summary>
+        ${scenarioBlock(s.computed.scenarios.optimiste, "Optimiste")}
+      </details>
+      ${cardSheetListingsBlock(s)}` : `<p class="note">Enregistre la fiche pour voir le calcul et suivre des annonces.</p>`}
+
+    <div class="actions">
+      ${s?`<button class="btn danger ghost" data-del-sheet="${s.id}">Supprimer</button>`:""}
+      ${s && s.status==="open" ? `<button class="btn" data-archive-sheet="${s.id}">Archiver</button>
+        <button class="btn primary" data-realize-sheet="${s.id}">Marquer achetée</button>` : ""}
+      <button class="btn primary" data-save-sheet="${s?.id||""}">Enregistrer</button>
+    </div>
+  `,"center");
+  const modeSel = document.getElementById("cs-mode");
+  if(modeSel) modeSel.addEventListener("change", ()=>{
+    document.getElementById("cs-manual-range").style.display = modeSel.value==="manual" ? "grid" : "none";
+  });
+}
+
+function cardSheetRealizeForm(id){
+  const s = cardDeals.card_sheets.find(x=>x.id===id); if(!s) return;
+  const prudent = s.computed.scenarios.prudent;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Passage au portefeuille</span><h2>${esc(s.item_name||s.name||"Fiche")}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note" style="margin-bottom:14px">Saisis ce que tu as réellement payé, port et frais compris (coût de revient constaté).</p>
+    <div class="f3">
+      <label><span class="lb">Prix payé (tout compris) / u</span><input id="csr-price" type="number" step="0.01" min="0"
+        value="${prudent?prudent.c_max:""}"></label>
+      <label><span class="lb">Quantité</span><input id="csr-qty" type="number" min="1" step="1" value="1"></label>
+      <label><span class="lb">Date</span><input id="csr-date" type="date" value="${today()}"></label>
+    </div>
+    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-save-realize-sheet="${id}">Ajouter au portefeuille</button></div>
+  `,"center");
+}
+
+function orderLineRow(l, order){
+  const flagged = l.profit_pct!=null && l.profit_pct < order.computed.low_margin_alert_pct;
+  return `<div class="comp" style="grid-template-columns:1fr auto auto auto">
+      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${l.unit_price_jpy?Math.round(l.unit_price_jpy).toLocaleString('fr-FR')+' ¥ · ':""}coût ${eur(l.unit_landed_cost)}</span></span>
+      <span class="p">${eur(l.unit_landed_cost)}</span>
+      <span class="${l.profit_pct==null?'dim':flagged?'loss':'gain'}" style="font-size:12px">${l.profit_pct!=null?pct(l.profit_pct):"—"}</span>
+      <span>
+        <button class="x" data-toggle-line="${l.id}" title="Détail (revente visée)">⚙</button>
+        ${order.status==="recue" && !l.item_id ? `<button class="x" data-realize-line="${l.id}" title="Basculer au portefeuille">↦</button>` : ""}
+        <button class="x" data-del-line="${l.id}" title="Supprimer">✕</button>
+      </span>
+    </div>
+    <div id="line-edit-${l.id}" style="display:none;margin:0 0 10px;padding:10px;background:var(--panel2);border-radius:var(--r-sm)">
+      <div class="f2" style="margin:0 0 10px">
+        <label><span class="lb">Revente visée (€)</span><input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
+        <label><span class="lb">Plateforme</span><select id="ole-platform-${l.id}">
+          <option value="">—</option>
+          ${Object.entries(SELL_PLATFORM_LABELS).map(([k,lb])=>`<option value="${k}" ${l.resale_platform===k?"selected":""}>${lb}</option>`).join("")}
+        </select></label>
+      </div>
+      <button class="btn" data-save-line-detail="${l.id}" data-order="${order.id}" style="width:100%">Enregistrer le détail</button>
+    </div>`;
+}
+
+function receiveBlock(o){
+  return `<span class="eyebrow">Réception — montants réellement facturés</span>
+    <div class="f3" style="margin:8px 0 10px">
+      <label><span class="lb">Droits payés (€)</span><input id="rc-duty" type="number" min="0" step="0.01" value="0"></label>
+      <label><span class="lb">TVA payée (€)</span><input id="rc-vat" type="number" min="0" step="0.01" value="0"></label>
+      <label><span class="lb">Frais de dossier payés (€)</span><input id="rc-carrier" type="number" min="0" step="0.01" value="0"></label>
+    </div>
+    <button class="btn primary" data-receive-order="${o.id}" style="width:100%">Valider la réception</button>`;
+}
+
+function importOrderSheet(id){
+  const o = id ? cardDeals.import_orders.find(x=>x.id===id) : null;
+  openOrderId = id;
+  const editable = !o || o.status==="brouillon";
+  const c = o?.computed;
+  const statusLbl = o ? ({brouillon:"Brouillon", commandee:"Commandée", recue:"Reçue"}[o.status]) : "";
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">${o?"Commande d'import Japon":"Nouvelle"}${o?" · "+statusLbl:""}</span>
+      <h2>${o?esc(o.name||"Commande"):"Import Japon"}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+
+    <div class="f2">
+      <label><span class="lb">Nom</span><input id="io-name" value="${esc(o?.name||"")}" placeholder="Commande Buyee #1" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Fournisseur</span><input id="io-supplier" value="${esc(o?.supplier||"Buyee")}" ${editable?"":"disabled"}></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Date</span><input id="io-date" type="date" value="${o?.order_date||today()}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Répartition sur les lignes</span><select id="io-split" ${editable?"":"disabled"}>
+        <option value="value" ${o?.split_mode!=="equal"?"selected":""}>Au prorata de la valeur</option>
+        <option value="equal" ${o?.split_mode==="equal"?"selected":""}>Parts égales par unité</option>
+      </select></label>
+    </div>
+
     <hr class="sep">
-    <span class="eyebrow">Revente visée (vide = reprend l'estimation de l'item lié)</span>
+    <div class="est-top" style="margin-bottom:8px">
+      <span class="eyebrow">Taux de change</span>
+      <span class="num">${o?.fx_rate?`1 ¥ = ${o.fx_rate} €`:"—"}${o?.fx_rate_at?` <span class="dim" style="font-size:11px">(figé le ${o.fx_rate_at.slice(0,10)})</span>`:""}</span>
+    </div>
+    ${!o || o.status==="brouillon" ? `<button class="btn" data-refresh-fx="${o?.id||''}" ${!o?'disabled title="Enregistre d\'abord la commande"':''}>↻ Actualiser le taux (frankfurter.dev)</button>` : `<p class="note">Taux figé au passage en "commandée" pour que le calcul reste reproductible même si le taux bouge après.</p>`}
+    <div class="f2" style="margin-top:12px">
+      <label><span class="lb">Spread de change (%)</span><input id="io-fxspread" type="number" min="0" step="0.1"
+        value="${o?.fx_spread_pct??""}" placeholder="${cardDeals.settings.fx_spread_pct}" ${editable?"":"disabled"}></label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="io-ioss" ${o?.ioss_enabled?"checked":""} style="width:auto;min-height:auto" ${editable?"":"disabled"}>
+        <span>Sous IOSS (TVA réglée au paiement)</span></label>
+    </div>
+
+    <hr class="sep">
+    <span class="eyebrow">Frais (par commande)</span>
     <div class="f3" style="margin-top:8px">
-      <label><span class="lb">eBay</span><input id="d-rp-ebay" type="number" step="0.01" min="0" value="${rp.ebay??""}"></label>
-      <label><span class="lb">Vinted</span><input id="d-rp-vinted" type="number" step="0.01" min="0" value="${rp.vinted??""}"></label>
-      <label><span class="lb">Cardmarket</span><input id="d-rp-cardmarket" type="number" step="0.01" min="0" value="${rp.cardmarket??""}"></label>
+      <label><span class="lb">Commission proxy (%)</span><input id="io-fee-proxy" type="number" min="0" step="0.1" value="${o?.fee_proxy_pct??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Port domestique JP (¥)</span><input id="io-fee-domestic" type="number" min="0" step="1" value="${o?.fee_domestic_jpy??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Consolidation (¥)</span><input id="io-fee-consolidation" type="number" min="0" step="1" value="${o?.fee_consolidation_jpy??0}" ${editable?"":"disabled"}></label>
     </div>
     <div class="f3">
-      <label><span class="lb">Port sortant</span><input id="d-ship-out" type="number" step="0.01" min="0" value="${d?.resale_shipping_out??0}"></label>
-      <label><span class="lb">Emballage</span><input id="d-pack" type="number" step="0.01" min="0" value="${d?.packaging_cost??0}"></label>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="d-buyer-ship" ${d?.buyer_pays_shipping?"checked":""} style="width:auto;min-height:auto"> <span>Port à charge acheteur (eBay)</span></label>
+      <label><span class="lb">Port international (¥)</span><input id="io-fee-intl" type="number" min="0" step="1" value="${o?.fee_intl_shipping_jpy??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Frais de paiement (%)</span><input id="io-fee-payment" type="number" min="0" step="0.1" value="${o?.fee_payment_pct??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Seuil alerte marge (%)</span><input id="io-lowmargin" type="number" min="0" step="1" value="${o?.low_margin_alert_pct??""}" placeholder="${cardDeals.settings.low_margin_alert_pct}" ${editable?"":"disabled"}></label>
     </div>
-    <label><span class="lb">Notes</span><textarea id="d-notes" rows="2">${esc(d?.notes||"")}</textarea></label>
-    ${dealPhotosBlock(d)}
+    <span class="eyebrow">Taxes (surcharge, sinon réglages par défaut)</span>
+    <div class="f3" style="margin-top:8px">
+      <label><span class="lb">TVA (%)</span><input id="io-vat" type="number" min="0" step="0.5" value="${o?.vat_rate_pct??""}" placeholder="${cardDeals.settings.import.vat_rate}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Droits de douane (%)</span><input id="io-duty" type="number" min="0" step="0.5" value="${o?.duty_rate_pct??""}" placeholder="${cardDeals.settings.import.duty_rate}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Frais de dossier (€)</span><input id="io-carrier" type="number" min="0" step="1" value="${o?.carrier_fee_eur??""}" placeholder="${cardDeals.settings.import.carrier_fee}" ${editable?"":"disabled"}></label>
+    </div>
+    <label><span class="lb">Notes</span><textarea id="io-notes" rows="2" ${editable?"":"disabled"}>${esc(o?.notes||"")}</textarea></label>
+
+    ${o ? `
+    <hr class="sep">
+    <div class="stats">
+      <div class="stat"><span class="eyebrow">Articles</span><div class="v">${eur(c.total_articles_eur)}</div></div>
+      <div class="stat"><span class="eyebrow">Taxes + frais</span><div class="v">${eur(c.grand_total_eur-c.total_articles_eur)}</div></div>
+      <div class="stat"><span class="eyebrow">Total commande</span><div class="v">${eur(c.grand_total_eur)}</div></div>
+      <div class="stat"><span class="eyebrow">Bénéfice estimé</span><div class="v ${c.profit_total_eur>=0?'gain':'loss'}">${eur(c.profit_total_eur)} · ${c.margin_pct!=null?pct(c.margin_pct):"—"}</div></div>
+    </div>
+    <details style="margin-top:10px"><summary class="eyebrow" style="cursor:pointer">Détail de la cascade fiscale</summary>
+      <div style="margin-top:8px;font-size:13px">
+        <div class="comp" style="grid-template-columns:1fr auto"><span>1. Valeur en douane (articles + port intl)</span><span class="p">${eur(c.cascade.valeur_douane)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>2. Droits de douane</span><span class="p">${eur(c.cascade.duty)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>3. Base TVA (douane + droits)</span><span class="p">${c.cascade.base_tva!=null?eur(c.cascade.base_tva):"—"}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>4. TVA${o.ioss_enabled?" (neutralisée IOSS)":""}</span><span class="p">${eur(c.cascade.vat)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>5. Frais de dossier${o.ioss_enabled?" (neutralisés IOSS)":""}</span><span class="p">${eur(c.cascade.dossier)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span>Frais de service (proxy, port JP, consolidation, paiement)</span><span class="p">${eur(c.service_fees.proxy_commission+c.service_fees.domestic_shipping+c.service_fees.consolidation+c.service_fees.payment_fee)}</span></div>
+        <div class="comp" style="grid-template-columns:1fr auto"><span><b>Total</b></span><span class="p"><b>${eur(c.grand_total_eur)}</b></span></div>
+        <p class="note">Somme des lignes : ${eur(c.sum_check)} ${c.sum_check===c.grand_total_eur?"✓ exact au centime":"⚠ écart"}${c.using_received_amounts?" · basé sur les montants réellement facturés":""}</p>
+      </div>
+    </details>
+    ${c.n_flagged?`<div class="warn" style="margin-top:10px">${c.n_flagged} carte${c.n_flagged>1?"s":""} sous le seuil de marge (${c.low_margin_alert_pct}%)</div>`:""}
+
+    <hr class="sep">
+    <span class="eyebrow">Cartes (${o.lines.length}) — triées par bénéfice</span>
+    <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne. Ajoute au moins le nom, la quantité et le prix en ¥.</p>`}</div>
+    <div class="f3">
+      <label><span class="lb">Nom</span><input id="ol-name" placeholder="Pikachu promo"></label>
+      <label><span class="lb">Quantité</span><input id="ol-qty" type="number" min="1" step="1" value="1"></label>
+      <label><span class="lb">Prix unitaire (¥)</span><input id="ol-price" type="number" min="0" step="1" placeholder="0"></label>
+    </div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" data-add-line="${o.id}">+ Ajouter la ligne</button></div>
+
+    <hr class="sep">
+    ${o.status==="brouillon" ? `<button class="btn primary" data-set-status="commandee" data-order="${o.id}" style="width:100%;margin-bottom:10px">Marquer commandée (fige le taux de change)</button>` : ""}
+    ${o.status==="commandee" ? receiveBlock(o) : ""}
+    ` : ""}
+
     <div class="actions">
-      ${d? `<button class="btn danger ghost" data-del-deal="${d.id}">Supprimer</button>`:""}
-      <button class="btn primary" data-save-deal="${d?.id||""}">Enregistrer</button>
+      ${o?`<button class="btn danger ghost" data-del-order="${o.id}">Supprimer</button>`:""}
+      ${editable ? `<button class="btn primary" data-save-order="${o?.id||""}">Enregistrer</button>` : ""}
     </div>
   `,"center");
 }
 
-function dealSettingsForm(){
-  const p = dealParams;
+function cardSettingsForm(){
+  const p = cardDeals.settings;
   openSheet(`
     <div class="sheet-head"><div><span class="eyebrow">Réglages</span><h2>Achat-revente</h2></div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
     <div class="f3">
-      <label><span class="lb">TVA import (%)</span><input id="dp-vat" type="number" min="0" step="0.5" value="${p.vat_rate}"></label>
-      <label><span class="lb">Droits de douane (%)</span><input id="dp-duty" type="number" min="0" step="0.5" value="${p.duty_rate}"></label>
-      <label><span class="lb">Frais de dossier (€)</span><input id="dp-carrier" type="number" min="0" step="1" value="${p.carrier_fee}"></label>
+      <label><span class="lb">Objectif de bénéfice par défaut (%)</span><input id="cds-target" type="number" min="0" step="0.5" value="${p.profit_target_pct}"></label>
+      <label><span class="lb">Seuil alerte marge faible (%)</span><input id="cds-lowmargin" type="number" min="0" step="1" value="${p.low_margin_alert_pct}"></label>
+      <label><span class="lb">Taille de lot Japon (réf.)</span><input id="cds-lotsize" type="number" min="1" step="1" value="${p.japan_lot_size}"></label>
     </div>
-    <label><span class="lb">Seuil IOSS (€)</span><input id="dp-ioss" type="number" min="0" step="1" value="${p.ioss_threshold}"></label>
-    <p class="note">Taux vérifiés le ${p.verified_at}. Mets-les à jour si tu as une info plus récente.</p>
+    <label><span class="lb">Spread de change (%)</span><input id="cds-fxspread" type="number" min="0" step="0.1" value="${p.fx_spread_pct}"></label>
+    <p class="note">Le taux interbancaire nu (frankfurter.dev) est toujours plus favorable que ce que tu obtiens réellement (carte, PayPal…) : ce spread corrige l'écart.</p>
     <hr class="sep">
-    <span class="eyebrow">Frais par plateforme de revente</span>
-    <div class="f2" style="margin-top:8px">
-      ${Object.entries(SELL_PLATFORMS).map(([k,label])=>`
-        <div>
-          <label><span class="lb">${label} — commission (%)</span><input data-pf-pct="${k}" type="number" min="0" step="0.5" value="${p.platform_fees[k]?.pct??0}"></label>
-          <label><span class="lb">${label} — frais fixe (€)</span><input data-pf-fixed="${k}" type="number" min="0" step="0.05" value="${p.platform_fees[k]?.fixed??0}"></label>
-        </div>`).join("")}
+    <span class="eyebrow">Import (douane / TVA)</span>
+    <div class="f3" style="margin-top:8px">
+      <label><span class="lb">TVA (%)</span><input id="cds-vat" type="number" min="0" step="0.5" value="${p.import.vat_rate}"></label>
+      <label><span class="lb">Droits de douane (%)</span><input id="cds-duty" type="number" min="0" step="0.5" value="${p.import.duty_rate}"></label>
+      <label><span class="lb">Frais de dossier (€)</span><input id="cds-carrier" type="number" min="0" step="1" value="${p.import.carrier_fee}"></label>
     </div>
-    <div class="actions"><button class="btn primary" data-save-deal-params>Enregistrer</button></div>
+    <label><span class="lb">Seuil IOSS (€)</span><input id="cds-ioss" type="number" min="0" step="1" value="${p.import.ioss_threshold}"></label>
+    <p class="note">Taux vérifiés le ${p.import.verified_at}.</p>
+    <hr class="sep">
+    <span class="eyebrow">Frais à la revente</span>
+    <div class="f2" style="margin-top:8px">
+      ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<div>
+        <label><span class="lb">${l} — commission (%)</span><input data-sf-pct="${k}" type="number" min="0" step="0.1" value="${p.sell_fees[k]?.pct??0}"></label>
+        <label><span class="lb">${l} — frais fixe (€)</span><input data-sf-fixed="${k}" type="number" min="0" step="0.05" value="${p.sell_fees[k]?.fixed??0}"></label>
+      </div>`).join("")}
+    </div>
+    <hr class="sep">
+    <span class="eyebrow">Frais à l'achat</span>
+    <div class="f2" style="margin-top:8px">
+      <div>
+        <label><span class="lb">Vinted — protection acheteur (%)</span><input id="cds-vinted-pct" type="number" min="0" step="0.1" value="${p.buy_fees.vinted.protection_pct}"></label>
+        <label><span class="lb">Vinted — frais fixe acheteur (€)</span><input id="cds-vinted-fixed" type="number" min="0" step="0.05" value="${p.buy_fees.vinted.protection_fixed}"></label>
+      </div>
+      ${["ebay","cardmarket","japan"].map(k=>`<label><span class="lb">${BUY_PLATFORM_LABELS[k]} — port par défaut (€)</span>
+        <input data-bf-ship="${k}" type="number" min="0" step="0.1" value="${p.buy_fees[k]?.default_shipping??0}"></label>`).join("")}
+    </div>
+    <div class="actions"><button class="btn primary" data-save-card-settings>Enregistrer</button></div>
   `,"center");
 }
 
@@ -835,10 +1047,11 @@ function menuSheet(){
       <button class="btn ghost" data-close-btn>Fermer</button></div>
     <div class="menu-list">
       <button class="menu-item" data-action="new-item">+ Nouvel item</button>
-      <button class="menu-item" data-action="new-deal">+ Nouvelle opération achat-revente</button>
+      <button class="menu-item" data-action="new-card-sheet">+ Fiche carte</button>
+      <button class="menu-item" data-action="new-import-order">+ Import Japon</button>
       <button class="menu-item" data-action="snapshot">Enregistrer un point (courbe)</button>
       <button class="menu-item" data-action="settings">Réglages de l'estimation</button>
-      <button class="menu-item" data-action="deal-settings">Réglages achat-revente</button>
+      <button class="menu-item" data-action="card-settings">Réglages achat-revente</button>
       <button class="menu-item" data-action="export">Exporter (JSON)</button>
       <button class="menu-item" data-action="export-zip">Exporter tout (ZIP + photos)</button>
       <button class="menu-item" data-action="import">Importer</button>
@@ -1007,77 +1220,160 @@ document.addEventListener("click", async ev=>{
       closeSheet(); return refresh();
     }
 
-    // --- Achat-revente ---
-    if(act==="new-deal") return dealForm(null);
-    if(act==="deal-settings") return dealSettingsForm();
-    const edD = t.closest("[data-edit-deal]"); if(edD) return dealForm(edD.dataset.editDeal);
+    // --- Achat-revente : fiches carte ---
+    if(act==="new-card-sheet") return cardSheetSheet(null);
+    if(act==="new-import-order") return importOrderSheet(null);
+    if(act==="card-settings") return cardSettingsForm();
 
-    const sd = t.closest("[data-save-deal]");
-    if(sd){
+    const os = t.closest("[data-open-sheet]"); if(os) return cardSheetSheet(os.dataset.openSheet);
+    const oo = t.closest("[data-open-order]"); if(oo) return importOrderSheet(oo.dataset.openOrder);
+
+    const ss = t.closest("[data-save-sheet]");
+    if(ss){
+      const g = x => document.getElementById(x).value.trim();
+      const body = {
+        item_id: g("cs-item")||null, name:g("cs-name"), type:g("cs-type"), grade:g("cs-grade"),
+        lang:g("cs-lang"), set_name:g("cs-set"),
+        profit_target_pct: g("cs-target")||null, resale_platform:g("cs-resale-platform"),
+        resale_mode: g("cs-mode"), resale_min:g("cs-min")||null, resale_median:g("cs-median")||null, resale_max:g("cs-max")||null,
+        resale_shipping_cost:g("cs-ship")||0, packaging_cost:g("cs-pack")||0, notes:g("cs-notes"),
+      };
+      if(!body.item_id && !body.name) return document.getElementById("cs-name").focus();
+      const id = ss.dataset.saveSheet;
+      const saved = id ? await api("/api/card-sheets/"+id,{json:body,method:"PUT"}) : await api("/api/card-sheets",{json:body,method:"POST"});
+      await loadCardDeals(); return cardSheetSheet(id||saved.id);
+    }
+    const ds = t.closest("[data-del-sheet]");
+    if(ds){
+      if(!confirm("Supprimer cette fiche ?")) return;
+      await api("/api/card-sheets/"+ds.dataset.delSheet,{method:"DELETE"});
+      await loadCardDeals(); closeSheet(); return renderRows();
+    }
+    const asf = t.closest("[data-archive-sheet]");
+    if(asf){
+      await api(`/api/card-sheets/${asf.dataset.archiveSheet}/archive`,{method:"POST"});
+      await loadCardDeals(); closeSheet(); return renderRows();
+    }
+    const rsf = t.closest("[data-realize-sheet]"); if(rsf) return cardSheetRealizeForm(rsf.dataset.realizeSheet);
+    const srs = t.closest("[data-save-realize-sheet]");
+    if(srs){
+      await api(`/api/card-sheets/${srs.dataset.saveRealizeSheet}/realize`,{method:"POST",json:{
+        buy_price:document.getElementById("csr-price").value, qty:document.getElementById("csr-qty").value,
+        buy_date:document.getElementById("csr-date").value}});
+      await Promise.all([loadCardDeals(), refresh()]); closeSheet(); return renderRows();
+    }
+    const al = t.closest("[data-add-listing]");
+    if(al){
+      const price = document.getElementById("l-price").value;
+      if(!(parseFloat(price)>0)) return document.getElementById("l-price").focus();
+      await api(`/api/card-sheets/${al.dataset.addListing}/listings`,{json:{
+        platform:document.getElementById("l-platform").value, price,
+        shipping:document.getElementById("l-shipping").value||0, url:document.getElementById("l-url").value.trim()}});
+      await loadCardDeals(); return cardSheetSheet(al.dataset.addListing);
+    }
+    const dl = t.closest("[data-del-listing]");
+    if(dl){
+      await api(`/api/card-sheets/${dl.dataset.sheet}/listings/${dl.dataset.delListing}`,{method:"DELETE"});
+      await loadCardDeals(); return cardSheetSheet(dl.dataset.sheet);
+    }
+
+    // --- Achat-revente : commandes d'import Japon ---
+    const so = t.closest("[data-save-order]");
+    if(so){
       const g = x => document.getElementById(x).value.trim();
       const gc = x => document.getElementById(x).checked;
-      const resale_prices = {};
-      ["ebay","vinted","cardmarket"].forEach(k=>{
-        const v = g(`d-rp-${k}`); if(v) resale_prices[k] = v;
-      });
       const body = {
-        item_id: g("d-item") || null, name: g("d-name"), type: g("d-type"),
-        lang: g("d-lang"), grade: g("d-grade"), platform: g("d-platform"),
-        lot_price: g("d-price"), lot_shipping: g("d-ship"), qty: g("d-qty"),
-        is_import: gc("d-import"), is_ioss: gc("d-ioss"), split_mode: g("d-split"),
-        resale_prices, resale_shipping_out: g("d-ship-out"), packaging_cost: g("d-pack"),
-        buyer_pays_shipping: gc("d-buyer-ship"), notes: g("d-notes"),
+        name:g("io-name"), supplier:g("io-supplier"), order_date:g("io-date"), split_mode:g("io-split"),
+        fx_spread_pct:g("io-fxspread")||null, ioss_enabled:gc("io-ioss"),
+        fee_proxy_pct:g("io-fee-proxy")||0, fee_domestic_jpy:g("io-fee-domestic")||0,
+        fee_consolidation_jpy:g("io-fee-consolidation")||0, fee_intl_shipping_jpy:g("io-fee-intl")||0,
+        fee_payment_pct:g("io-fee-payment")||0, low_margin_alert_pct:g("io-lowmargin")||null,
+        vat_rate_pct:g("io-vat")||null, duty_rate_pct:g("io-duty")||null, carrier_fee_eur:g("io-carrier")||null,
+        notes:g("io-notes"),
       };
-      const id = sd.dataset.saveDeal;
-      const saved = id ? await api("/api/deals/"+id, {json:body, method:"PUT"})
-                        : await api("/api/deals", {json:body, method:"POST"});
-      await loadDeals(); closeSheet(); return renderRows();
+      const id = so.dataset.saveOrder;
+      const saved = id ? await api("/api/import-orders/"+id,{json:body,method:"PUT"}) : await api("/api/import-orders",{json:body,method:"POST"});
+      await loadCardDeals(); return importOrderSheet(id||saved.id);
     }
-    const dd = t.closest("[data-del-deal]");
-    if(dd){
-      if(!confirm("Supprimer cette opération ?")) return;
-      await api("/api/deals/"+dd.dataset.delDeal,{method:"DELETE"});
-      await loadDeals(); closeSheet(); return renderRows();
+    const doo = t.closest("[data-del-order]");
+    if(doo){
+      if(!confirm("Supprimer cette commande et ses lignes ?")) return;
+      await api("/api/import-orders/"+doo.dataset.delOrder,{method:"DELETE"});
+      await loadCardDeals(); closeSheet(); return renderRows();
     }
-    const rd = t.closest("[data-realize-deal]");
-    if(rd){
-      if(!confirm("Marquer réalisée ? L'item bascule au portefeuille avec le coût de revient comme prix d'achat.")) return;
-      await api(`/api/deals/${rd.dataset.realizeDeal}/realize`,{method:"POST"});
-      await Promise.all([loadDeals(), refresh()]); return renderRows();
+    const rfx = t.closest("[data-refresh-fx]");
+    if(rfx && rfx.dataset.refreshFx){
+      await api(`/api/import-orders/${rfx.dataset.refreshFx}/refresh-fx`,{method:"POST"});
+      await loadCardDeals(); return importOrderSheet(rfx.dataset.refreshFx);
     }
-    const sdp = t.closest("[data-save-deal-params]");
-    if(sdp){
-      const platform_fees = {};
-      document.querySelectorAll("[data-pf-pct]").forEach(el=>{
-        platform_fees[el.dataset.pfPct] = {...(platform_fees[el.dataset.pfPct]||{}), pct: el.value};
-      });
-      document.querySelectorAll("[data-pf-fixed]").forEach(el=>{
-        platform_fees[el.dataset.pfFixed] = {...(platform_fees[el.dataset.pfFixed]||{}), fixed: el.value};
-      });
-      await api("/api/deal-params",{method:"PUT", json:{
-        vat_rate:document.getElementById("dp-vat").value,
-        duty_rate:document.getElementById("dp-duty").value,
-        carrier_fee:document.getElementById("dp-carrier").value,
-        ioss_threshold:document.getElementById("dp-ioss").value,
-        platform_fees,
+    const sst = t.closest("[data-set-status]");
+    if(sst){
+      await api(`/api/import-orders/${sst.dataset.order}/status`,{method:"POST",json:{status:sst.dataset.setStatus}});
+      await loadCardDeals(); return importOrderSheet(sst.dataset.order);
+    }
+    const rco = t.closest("[data-receive-order]");
+    if(rco){
+      await api(`/api/import-orders/${rco.dataset.receiveOrder}/receive`,{method:"POST",json:{
+        received_duty_eur:document.getElementById("rc-duty").value||0,
+        received_vat_eur:document.getElementById("rc-vat").value||0,
+        received_carrier_fee_eur:document.getElementById("rc-carrier").value||0}});
+      await Promise.all([loadCardDeals(), refresh()]); return importOrderSheet(rco.dataset.receiveOrder);
+    }
+    const addl = t.closest("[data-add-line]");
+    if(addl){
+      const name = document.getElementById("ol-name").value.trim();
+      const price = document.getElementById("ol-price").value;
+      if(!name) return document.getElementById("ol-name").focus();
+      if(!(parseFloat(price)>=0)) return document.getElementById("ol-price").focus();
+      await api(`/api/import-orders/${addl.dataset.addLine}/lines`,{json:{
+        name, qty:document.getElementById("ol-qty").value||1, unit_price_jpy:price}});
+      await loadCardDeals(); return importOrderSheet(addl.dataset.addLine);
+    }
+    const tgl = t.closest("[data-toggle-line]");
+    if(tgl){
+      const el=document.getElementById("line-edit-"+tgl.dataset.toggleLine);
+      if(el) el.style.display = el.style.display==="none" ? "block" : "none";
+      return;
+    }
+    const svld = t.closest("[data-save-line-detail]");
+    if(svld){
+      const lid = svld.dataset.saveLineDetail, oid = svld.dataset.order;
+      const order = cardDeals.import_orders.find(x=>x.id===oid);
+      const line = order?.lines.find(l=>l.id===lid);
+      if(!line) return;
+      await api(`/api/import-order-lines/${lid}`,{method:"PUT",json:{
+        name:line.name, type:line.type, qty:line.qty, unit_price_jpy:line.unit_price_jpy,
+        resale_target_eur:document.getElementById("ole-resale-"+lid).value||null,
+        resale_platform:document.getElementById("ole-platform-"+lid).value||null}});
+      await loadCardDeals(); return importOrderSheet(oid);
+    }
+    const delln = t.closest("[data-del-line]");
+    if(delln){
+      const oid = openOrderId;
+      await api("/api/import-order-lines/"+delln.dataset.delLine,{method:"DELETE"});
+      await loadCardDeals(); return importOrderSheet(oid);
+    }
+    const rlz = t.closest("[data-realize-line]");
+    if(rlz){
+      if(!confirm("Basculer cette carte au portefeuille avec son coût de revient calculé comme prix d'achat ?")) return;
+      await api(`/api/import-order-lines/${rlz.dataset.realizeLine}/realize`,{method:"POST",json:{}});
+      await Promise.all([loadCardDeals(), refresh()]); return importOrderSheet(openOrderId);
+    }
+    const scs = t.closest("[data-save-card-settings]");
+    if(scs){
+      const g = id => document.getElementById(id).value;
+      const sell_fees = {};
+      document.querySelectorAll("[data-sf-pct]").forEach(el=>{ sell_fees[el.dataset.sfPct] = {...(sell_fees[el.dataset.sfPct]||{}), pct: el.value}; });
+      document.querySelectorAll("[data-sf-fixed]").forEach(el=>{ sell_fees[el.dataset.sfFixed] = {...(sell_fees[el.dataset.sfFixed]||{}), fixed: el.value}; });
+      const buy_fees = {vinted:{protection_pct:g("cds-vinted-pct"), protection_fixed:g("cds-vinted-fixed")}};
+      document.querySelectorAll("[data-bf-ship]").forEach(el=>{ buy_fees[el.dataset.bfShip] = {...(buy_fees[el.dataset.bfShip]||{}), default_shipping: el.value}; });
+      await api("/api/card-settings",{method:"PUT", json:{
+        profit_target_pct:g("cds-target"), low_margin_alert_pct:g("cds-lowmargin"), japan_lot_size:g("cds-lotsize"),
+        fx_spread_pct:g("cds-fxspread"),
+        import: {vat_rate:g("cds-vat"), duty_rate:g("cds-duty"), carrier_fee:g("cds-carrier"), ioss_threshold:g("cds-ioss")},
+        sell_fees, buy_fees,
       }});
-      await loadDeals(); closeSheet(); return renderRows();
-    }
-    const ddp = t.closest("[data-del-deal-photo]");
-    if(ddp){
-      if(!confirm("Supprimer cette photo ?")) return;
-      await api(`/api/deals/${ddp.dataset.dealOwner}/photos/${ddp.dataset.delDealPhoto}`,{method:"DELETE"});
-      await loadDeals(); return dealForm(ddp.dataset.dealOwner);
-    }
-    const dpu = t.closest("[data-deal-photo-up]");
-    if(dpu){
-      const did = dpu.dataset.dealOwner;
-      const deal = deals.find(x=>x.id===did); if(!deal) return;
-      const ids = (deal.photos||[]).map(p=>p.id);
-      const i0 = ids.indexOf(dpu.dataset.dealPhotoUp);
-      if(i0>0){ ids.splice(i0,1); ids.unshift(dpu.dataset.dealPhotoUp); }
-      await api(`/api/deals/${did}/photos/order`,{method:"PUT", json:{order:ids}});
-      await loadDeals(); return dealForm(did);
+      await loadCardDeals(); closeSheet(); return renderRows();
     }
 
     // --- saisie rapide ---
@@ -1100,7 +1396,7 @@ document.addEventListener("click", async ev=>{
       document.getElementById("items-toolbar").style.display = mode==="deals" ? "none" : "flex";
       document.getElementById("filters-items").style.display = mode==="deals" ? "none" : "flex";
       document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
-      if(mode==="deals" && !deals) await loadDeals();
+      if(mode==="deals" && !cardDeals) await loadCardDeals();
       return renderRows();
     }
     const chip = t.closest("[data-filter]");
@@ -1145,22 +1441,6 @@ document.addEventListener("change", async e=>{
       await api(`/api/items/${iid}/photos`,{method:"POST", body:fd});
     }
     await refresh(); return itemSheet(iid);
-  }catch(err){ alert("Upload impossible : "+err.message); }
-});
-
-document.addEventListener("change", async e=>{
-  if(e.target.id!=="deal-photo-file") return;
-  const did = e.target.dataset.deal;
-  const files = Array.from(e.target.files||[]);
-  e.target.value = "";
-  if(!files.length || !did) return;
-  try{
-    for(const f of files){
-      if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); continue; }
-      const fd = new FormData(); fd.append("file", f);
-      await api(`/api/deals/${did}/photos`,{method:"POST", body:fd});
-    }
-    await loadDeals(); return dealForm(did);
   }catch(err){ alert("Upload impossible : "+err.message); }
 });
 

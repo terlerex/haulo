@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 import media as media_mod
 import deals as deals_mod
+import card_deals as card_deals_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -168,6 +169,69 @@ def init() -> None:
                 note TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS purchases_item ON purchases(item_id);
+
+            -- Achat-revente v2 : fiches carte (calcul inversé) et commandes
+            -- d'import Japon. Tables neuves, indépendantes de deals/deal_media
+            -- (chantier 5, laissé intact). CREATE TABLE IF NOT EXISTS est
+            -- additif par nature : aucune donnée existante n'est touchée.
+            CREATE TABLE IF NOT EXISTS card_sheets(
+                id TEXT PRIMARY KEY,
+                item_id TEXT REFERENCES items(id) ON DELETE SET NULL,
+                name TEXT NOT NULL DEFAULT '',
+                type TEXT NOT NULL DEFAULT 'loose',
+                grade TEXT DEFAULT '',
+                lang TEXT DEFAULT '',
+                set_name TEXT DEFAULT '',
+                profit_target_pct REAL,
+                resale_platform TEXT NOT NULL DEFAULT 'ebay',
+                resale_mode TEXT NOT NULL DEFAULT 'auto',
+                resale_min REAL, resale_median REAL, resale_max REAL,
+                resale_shipping_cost REAL NOT NULL DEFAULT 0,
+                packaging_cost REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS card_sheet_listings(
+                id TEXT PRIMARY KEY,
+                sheet_id TEXT NOT NULL REFERENCES card_sheets(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL,
+                url TEXT DEFAULT '',
+                price REAL NOT NULL DEFAULT 0,
+                shipping REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS csl_sheet ON card_sheet_listings(sheet_id);
+            CREATE TABLE IF NOT EXISTS import_orders(
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                order_date TEXT,
+                supplier TEXT NOT NULL DEFAULT 'Buyee',
+                status TEXT NOT NULL DEFAULT 'brouillon',
+                fx_rate REAL, fx_rate_at TEXT, fx_spread_pct REAL,
+                fee_proxy_pct REAL, fee_domestic_jpy REAL, fee_consolidation_jpy REAL,
+                fee_intl_shipping_jpy REAL, fee_payment_pct REAL,
+                vat_rate_pct REAL, duty_rate_pct REAL, carrier_fee_eur REAL,
+                ioss_enabled INTEGER NOT NULL DEFAULT 0,
+                split_mode TEXT NOT NULL DEFAULT 'value',
+                low_margin_alert_pct REAL,
+                received_duty_eur REAL, received_vat_eur REAL, received_carrier_fee_eur REAL,
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS import_order_lines(
+                id TEXT PRIMARY KEY,
+                order_id TEXT NOT NULL REFERENCES import_orders(id) ON DELETE CASCADE,
+                item_id TEXT REFERENCES items(id) ON DELETE SET NULL,
+                name TEXT NOT NULL DEFAULT '',
+                type TEXT NOT NULL DEFAULT 'scelle',
+                qty INTEGER NOT NULL DEFAULT 1,
+                unit_price_jpy REAL NOT NULL DEFAULT 0,
+                resale_target_eur REAL,
+                resale_platform TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS iol_order ON import_order_lines(order_id, sort_order);
             """
         )
         migrate(con)
@@ -235,6 +299,65 @@ def put_deal_params(p: dict) -> dict:
             (json.dumps(current),),
         )
     return current
+
+
+def get_card_settings() -> dict:
+    with db() as con:
+        row = con.execute("SELECT v FROM settings WHERE k='card_deal_settings'").fetchone()
+    return card_deals_mod.merge_card_settings(json.loads(row["v"]) if row else None)
+
+
+def _num(v, fallback):
+    """Cast tolérant : le JS envoie parfois un nombre en string. Les calculs
+    (card_deals.py) font des opérations arithmétiques directes sur ces valeurs
+    (ex. 1 + fx_spread_pct/100) sans re-caster : une string y ferait planter
+    l'appel réseau/calcul, donc on caste une fois pour toutes ici, à l'écriture."""
+    if v in (None, ""):
+        return fallback
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def put_card_settings(p: dict) -> dict:
+    current = get_card_settings()
+    for k, v in p.items():
+        if k in ("import", "sell_fees", "buy_fees") and isinstance(v, dict):
+            for kk, vv in v.items():
+                if kk in current[k] and isinstance(vv, dict):
+                    for kkk, vvv in vv.items():
+                        current[k][kk][kkk] = _num(vvv, current[k][kk].get(kkk))
+                elif kk in current[k]:
+                    current[k][kk] = _num(vv, current[k][kk])
+        elif k == "japan_lot_size":
+            current[k] = int(_num(v, current[k]))
+        else:
+            current[k] = _num(v, current.get(k, v))
+    with db() as con:
+        con.execute(
+            "INSERT INTO settings(k,v) VALUES('card_deal_settings',?) "
+            "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (json.dumps(current),),
+        )
+    return current
+
+
+def fetch_jpy_eur_rate() -> float | None:
+    """Taux JPY->EUR via frankfurter.dev (ECB, gratuit, sans clé). Timeout
+    court, échec silencieux : ne doit JAMAIS bloquer un enregistrement."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://api.frankfurter.dev/v1/latest?base=JPY&symbols=EUR",
+            headers={"User-Agent": "portefeuille-pokemon"},
+        )
+        with urllib.request.urlopen(req, timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        rate = data.get("rates", {}).get("EUR")
+        return float(rate) if rate else None
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------------ auth
@@ -1102,6 +1225,438 @@ def api_get_deal_thumb(did: str, pid: str):
     return FileResponse(path, media_type="image/webp")
 
 
+# ------------------------------------------------------------- achat-revente v2
+# Fiches carte (calcul inversé) et commandes d'import Japon. Indépendant de
+# `deals`/`deal_media` (chantier 5), laissés intacts et non affichés côté UI.
+
+CARD_SHEET_FIELDS = ["item_id", "name", "type", "grade", "lang", "set_name",
+                      "profit_target_pct", "resale_platform", "resale_mode",
+                      "resale_min", "resale_median", "resale_max",
+                      "resale_shipping_cost", "packaging_cost", "status", "notes"]
+
+
+def clean_card_sheet(p: dict) -> dict:
+    def numopt(k):
+        v = p.get(k)
+        return float(v) if v not in (None, "") else None
+    return {
+        "item_id": (str(p["item_id"]) if p.get("item_id") else None),
+        "name": str(p.get("name", ""))[:200],
+        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "grade": str(p.get("grade", ""))[:40],
+        "lang": str(p.get("lang", ""))[:10],
+        "set_name": str(p.get("set_name", ""))[:120],
+        "profit_target_pct": numopt("profit_target_pct"),
+        "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else "ebay",
+        "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
+        "resale_min": numopt("resale_min"),
+        "resale_median": numopt("resale_median"),
+        "resale_max": numopt("resale_max"),
+        "resale_shipping_cost": max(0.0, float(p.get("resale_shipping_cost") or 0)),
+        "packaging_cost": max(0.0, float(p.get("packaging_cost") or 0)),
+        "status": p.get("status") if p.get("status") in ("open", "archived", "done") else "open",
+        "notes": str(p.get("notes", ""))[:2000],
+    }
+
+
+def _card_sheet_view(row: dict, items_by_id: dict, card_settings: dict, fx_rate: float | None) -> dict:
+    d = dict(row)
+    with db() as con:
+        listings = [dict(r) for r in con.execute(
+            "SELECT * FROM card_sheet_listings WHERE sheet_id=? ORDER BY created_at DESC", (d["id"],)
+        )]
+    if d["resale_mode"] == "manual":
+        resale_stats = {"p25": d["resale_min"], "median": d["resale_median"],
+                         "p75": d["resale_max"], "n": None, "manual": True}
+    else:
+        comps = items_by_id.get(d["item_id"], {}).get("comps", []) if d["item_id"] else []
+        resale_stats = card_deals_mod.resale_range_from_comps(comps)
+        resale_stats["manual"] = False
+    sheet_for_calc = {**d, "profit_target_pct": d["profit_target_pct"] or card_settings["profit_target_pct"]}
+    computed = card_deals_mod.build_card_sheet_view(sheet_for_calc, listings, card_settings, resale_stats, fx_rate=fx_rate)
+    d["listings"] = computed.pop("listings")
+    d["computed"] = computed
+    if d["item_id"] and d["item_id"] in items_by_id:
+        d["item_name"] = items_by_id[d["item_id"]]["name"]
+    return d
+
+
+@app.get("/api/card-deals")
+def api_list_card_deals():
+    st = build_state(snapshot=False)
+    items_by_id = {i["id"]: i for i in st["items"]}
+    cs = get_card_settings()
+    fx_rate = fetch_jpy_eur_rate()  # court, échec silencieux -> None si frankfurter.dev est injoignable
+    with db() as con:
+        sheets = [dict(r) for r in con.execute("SELECT * FROM card_sheets ORDER BY created_at DESC")]
+        orders = [dict(r) for r in con.execute("SELECT * FROM import_orders ORDER BY created_at DESC")]
+        lines_all = [dict(r) for r in con.execute(
+            "SELECT * FROM import_order_lines ORDER BY order_id, sort_order"
+        )]
+    lines_by_order: dict[str, list] = {}
+    for l in lines_all:
+        lines_by_order.setdefault(l["order_id"], []).append(l)
+    sheet_views = [_card_sheet_view(r, items_by_id, cs, fx_rate) for r in sheets]
+    order_views = []
+    for o in orders:
+        lines = lines_by_order.get(o["id"], [])
+        computed = card_deals_mod.build_import_order_view(o, lines, cs, fx_rate)
+        ov = dict(o)
+        ov["lines"] = computed.pop("lines")
+        ov["computed"] = computed
+        order_views.append(ov)
+    return {"card_sheets": sheet_views, "import_orders": order_views, "settings": cs, "fx_rate": fx_rate}
+
+
+@app.get("/api/card-settings")
+def api_get_card_settings():
+    return get_card_settings()
+
+
+@app.put("/api/card-settings")
+def api_put_card_settings(p: dict = Body(...)):
+    return put_card_settings(p)
+
+
+@app.get("/api/fx/jpy")
+def api_fx_jpy():
+    rate = fetch_jpy_eur_rate()
+    return {"rate": rate, "ok": rate is not None}
+
+
+# --- fiches carte ---
+
+@app.post("/api/card-sheets")
+def api_add_card_sheet(p: dict = Body(...)):
+    d = clean_card_sheet(p)
+    if not d["item_id"] and not d["name"]:
+        raise HTTPException(400, "nom manquant (ou lien vers un item existant)")
+    sid = nid()
+    with db() as con:
+        con.execute(
+            f"INSERT INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},created_at) "
+            f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?)",
+            (sid, *[d[f] for f in CARD_SHEET_FIELDS], datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"id": sid}
+
+
+@app.put("/api/card-sheets/{sid}")
+def api_edit_card_sheet(sid: str, p: dict = Body(...)):
+    d = clean_card_sheet(p)
+    with db() as con:
+        cur = con.execute(
+            f"UPDATE card_sheets SET {','.join(f + '=?' for f in CARD_SHEET_FIELDS)} WHERE id=?",
+            (*[d[f] for f in CARD_SHEET_FIELDS], sid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "fiche introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/card-sheets/{sid}")
+def api_del_card_sheet(sid: str):
+    with db() as con:
+        con.execute("DELETE FROM card_sheet_listings WHERE sheet_id=?", (sid,))
+        con.execute("DELETE FROM card_sheets WHERE id=?", (sid,))
+    return {"ok": True}
+
+
+@app.post("/api/card-sheets/{sid}/archive")
+def api_archive_card_sheet(sid: str):
+    with db() as con:
+        cur = con.execute("UPDATE card_sheets SET status='archived' WHERE id=?", (sid,))
+        if not cur.rowcount:
+            raise HTTPException(404, "fiche introuvable")
+    return {"ok": True}
+
+
+@app.post("/api/card-sheets/{sid}/realize")
+def api_realize_card_sheet(sid: str, p: dict = Body(...)):
+    """Bascule au portefeuille avec le prix d'achat réellement constaté (coût
+    de revient réel), pas le prix max calculé — l'utilisateur saisit ce qu'il
+    a vraiment payé."""
+    with db() as con:
+        row = con.execute("SELECT * FROM card_sheets WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "fiche introuvable")
+    d = dict(row)
+    buy_price = max(0.0, float(p.get("buy_price") or 0))
+    qty = max(1, int(p.get("qty") or 1))
+    buy_date = str(p.get("buy_date") or date.today().isoformat())[:10]
+    now = datetime.now().isoformat(timespec="seconds")
+    iid = d["item_id"]
+    with db() as con:
+        if iid:
+            con.execute("UPDATE items SET status='owned', buy_price=?, qty=?, buy_date=? WHERE id=?",
+                        (buy_price, qty, buy_date, iid))
+        else:
+            iid = nid()
+            con.execute(
+                "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, d["name"] or "Item sans nom", d["type"] if d["type"] in ("loose", "gradee") else "loose",
+                 d["lang"] or "FR", d["grade"], d["set_name"] or "", qty, buy_price, buy_date,
+                 d["notes"], "owned", 0.0, now),
+            )
+        con.execute("UPDATE card_sheets SET status='done', item_id=? WHERE id=?", (iid, sid))
+    return {"ok": True, "item_id": iid, "buy_price": buy_price}
+
+
+def clean_card_listing(p: dict) -> dict:
+    return {
+        "platform": p.get("platform") if p.get("platform") in card_deals_mod.BUY_PLATFORMS else "ebay",
+        "url": str(p.get("url", ""))[:500],
+        "price": max(0.0, float(p.get("price") or 0)),
+        "shipping": max(0.0, float(p.get("shipping") or 0)),
+    }
+
+
+@app.post("/api/card-sheets/{sid}/listings")
+def api_add_card_listing(sid: str, p: dict = Body(...)):
+    d = clean_card_listing(p)
+    lid = nid()
+    with db() as con:
+        if not con.execute("SELECT 1 FROM card_sheets WHERE id=?", (sid,)).fetchone():
+            raise HTTPException(404, "fiche introuvable")
+        con.execute(
+            "INSERT INTO card_sheet_listings(id,sheet_id,platform,url,price,shipping,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (lid, sid, d["platform"], d["url"], d["price"], d["shipping"],
+             datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"id": lid}
+
+
+@app.delete("/api/card-sheets/{sid}/listings/{lid}")
+def api_del_card_listing(sid: str, lid: str):
+    with db() as con:
+        con.execute("DELETE FROM card_sheet_listings WHERE id=? AND sheet_id=?", (lid, sid))
+    return {"ok": True}
+
+
+# --- commandes d'import Japon ---
+
+IMPORT_ORDER_FIELDS = ["name", "order_date", "supplier", "fx_spread_pct",
+                        "fee_proxy_pct", "fee_domestic_jpy", "fee_consolidation_jpy",
+                        "fee_intl_shipping_jpy", "fee_payment_pct",
+                        "vat_rate_pct", "duty_rate_pct", "carrier_fee_eur",
+                        "ioss_enabled", "split_mode", "low_margin_alert_pct", "notes"]
+
+
+def clean_import_order(p: dict) -> dict:
+    def numopt(k):
+        v = p.get(k)
+        return float(v) if v not in (None, "") else None
+    return {
+        "name": str(p.get("name", ""))[:200],
+        "order_date": str(p.get("order_date") or date.today().isoformat())[:10],
+        "supplier": str(p.get("supplier") or "Buyee")[:80],
+        "fx_spread_pct": numopt("fx_spread_pct"),
+        "fee_proxy_pct": max(0.0, float(p.get("fee_proxy_pct") or 0)),
+        "fee_domestic_jpy": max(0.0, float(p.get("fee_domestic_jpy") or 0)),
+        "fee_consolidation_jpy": max(0.0, float(p.get("fee_consolidation_jpy") or 0)),
+        "fee_intl_shipping_jpy": max(0.0, float(p.get("fee_intl_shipping_jpy") or 0)),
+        "fee_payment_pct": max(0.0, float(p.get("fee_payment_pct") or 0)),
+        "vat_rate_pct": numopt("vat_rate_pct"),
+        "duty_rate_pct": numopt("duty_rate_pct"),
+        "carrier_fee_eur": numopt("carrier_fee_eur"),
+        "ioss_enabled": int(bool(p.get("ioss_enabled"))),
+        "split_mode": p.get("split_mode") if p.get("split_mode") in ("value", "equal") else "value",
+        "low_margin_alert_pct": numopt("low_margin_alert_pct"),
+        "notes": str(p.get("notes", ""))[:2000],
+    }
+
+
+@app.post("/api/import-orders")
+def api_add_import_order(p: dict = Body(...)):
+    d = clean_import_order(p)
+    oid = nid()
+    with db() as con:
+        con.execute(
+            f"INSERT INTO import_orders(id,{','.join(IMPORT_ORDER_FIELDS)},created_at) "
+            f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?)",
+            (oid, *[d[f] for f in IMPORT_ORDER_FIELDS], datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"id": oid}
+
+
+@app.put("/api/import-orders/{oid}")
+def api_edit_import_order(oid: str, p: dict = Body(...)):
+    with db() as con:
+        row = con.execute("SELECT status FROM import_orders WHERE id=?", (oid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "commande introuvable")
+        if row["status"] != "brouillon":
+            raise HTTPException(400, "commande déjà passée : seuls les montants reçus sont modifiables (voir /receive)")
+        d = clean_import_order(p)
+        con.execute(
+            f"UPDATE import_orders SET {','.join(f + '=?' for f in IMPORT_ORDER_FIELDS)} WHERE id=?",
+            (*[d[f] for f in IMPORT_ORDER_FIELDS], oid),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/import-orders/{oid}")
+def api_del_import_order(oid: str):
+    with db() as con:
+        con.execute("DELETE FROM import_order_lines WHERE order_id=?", (oid,))
+        con.execute("DELETE FROM import_orders WHERE id=?", (oid,))
+    return {"ok": True}
+
+
+@app.post("/api/import-orders/{oid}/refresh-fx")
+def api_refresh_fx(oid: str):
+    """Rafraîchit le taux JPY->EUR, uniquement tant que la commande est en
+    brouillon (au-delà, le taux est figé pour la reproductibilité du calcul)."""
+    with db() as con:
+        row = con.execute("SELECT status FROM import_orders WHERE id=?", (oid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "commande introuvable")
+        if row["status"] != "brouillon":
+            raise HTTPException(400, "taux déjà figé (commande passée)")
+    rate = fetch_jpy_eur_rate()
+    if rate is None:
+        raise HTTPException(503, "taux de change indisponible pour le moment (frankfurter.dev injoignable)")
+    with db() as con:
+        con.execute("UPDATE import_orders SET fx_rate=?, fx_rate_at=? WHERE id=?",
+                    (rate, datetime.now().isoformat(timespec="seconds"), oid))
+    return {"ok": True, "fx_rate": rate}
+
+
+@app.post("/api/import-orders/{oid}/status")
+def api_set_order_status(oid: str, p: dict = Body(...)):
+    """Transition de statut. Au passage à 'commandee', le taux de change est
+    figé une fois pour toutes (reproductibilité du calcul même si le taux
+    bouge après) — sauf s'il l'était déjà (repassage impossible en arrière)."""
+    new_status = p.get("status")
+    if new_status not in ("brouillon", "commandee", "recue"):
+        raise HTTPException(400, "statut invalide")
+    with db() as con:
+        row = con.execute("SELECT * FROM import_orders WHERE id=?", (oid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "commande introuvable")
+        d = dict(row)
+        if new_status == "commandee" and d["status"] == "brouillon":
+            rate = d["fx_rate"] or fetch_jpy_eur_rate()
+            if rate is None:
+                raise HTTPException(503, "taux de change indisponible : réessaie, ou repasse en brouillon pour raffraîchir plus tard")
+            con.execute("UPDATE import_orders SET status=?, fx_rate=?, fx_rate_at=? WHERE id=?",
+                        (new_status, rate, d["fx_rate_at"] or datetime.now().isoformat(timespec="seconds"), oid))
+        else:
+            con.execute("UPDATE import_orders SET status=? WHERE id=?", (new_status, oid))
+    return {"ok": True}
+
+
+@app.post("/api/import-orders/{oid}/receive")
+def api_receive_order(oid: str, p: dict = Body(...)):
+    """Saisie des montants réellement facturés à réception (taxes, frais de
+    dossier) : le coût de revient est recalculé sur ces montants réels côté
+    build_import_order_view, l'écart estimé/réel reste visible (computed)."""
+    with db() as con:
+        cur = con.execute(
+            "UPDATE import_orders SET status='recue', received_duty_eur=?, received_vat_eur=?, "
+            "received_carrier_fee_eur=? WHERE id=?",
+            (float(p.get("received_duty_eur") or 0), float(p.get("received_vat_eur") or 0),
+             float(p.get("received_carrier_fee_eur") or 0), oid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "commande introuvable")
+    return {"ok": True}
+
+
+def clean_order_line(p: dict) -> dict:
+    return {
+        "item_id": (str(p["item_id"]) if p.get("item_id") else None),
+        "name": str(p.get("name", ""))[:200],
+        "type": p.get("type") if p.get("type") in ("scelle", "loose", "gradee") else "scelle",
+        "qty": max(1, int(p.get("qty") or 1)),
+        "unit_price_jpy": max(0.0, float(p.get("unit_price_jpy") or 0)),
+        "resale_target_eur": (float(p["resale_target_eur"]) if p.get("resale_target_eur") not in (None, "") else None),
+        "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else None,
+    }
+
+
+@app.post("/api/import-orders/{oid}/lines")
+def api_add_order_line(oid: str, p: dict = Body(...)):
+    d = clean_order_line(p)
+    if not d["name"]:
+        raise HTTPException(400, "nom manquant")
+    lid = nid()
+    with db() as con:
+        if not con.execute("SELECT 1 FROM import_orders WHERE id=?", (oid,)).fetchone():
+            raise HTTPException(404, "commande introuvable")
+        maxo = con.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM import_order_lines WHERE order_id=?", (oid,)
+        ).fetchone()["m"]
+        con.execute(
+            "INSERT INTO import_order_lines(id,order_id,item_id,name,type,qty,unit_price_jpy,resale_target_eur,resale_platform,sort_order)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (lid, oid, d["item_id"], d["name"], d["type"], d["qty"], d["unit_price_jpy"],
+             d["resale_target_eur"], d["resale_platform"], maxo + 1),
+        )
+    return {"id": lid}
+
+
+@app.put("/api/import-order-lines/{lid}")
+def api_edit_order_line(lid: str, p: dict = Body(...)):
+    d = clean_order_line(p)
+    with db() as con:
+        cur = con.execute(
+            "UPDATE import_order_lines SET item_id=?,name=?,type=?,qty=?,unit_price_jpy=?,"
+            "resale_target_eur=?,resale_platform=? WHERE id=?",
+            (d["item_id"], d["name"], d["type"], d["qty"], d["unit_price_jpy"],
+             d["resale_target_eur"], d["resale_platform"], lid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "ligne introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/import-order-lines/{lid}")
+def api_del_order_line(lid: str):
+    with db() as con:
+        con.execute("DELETE FROM import_order_lines WHERE id=?", (lid,))
+    return {"ok": True}
+
+
+@app.post("/api/import-order-lines/{lid}/realize")
+def api_realize_order_line(lid: str, p: dict = Body(...)):
+    """Bascule une ligne au portefeuille avec son coût de revient calculé
+    comme prix d'achat, sauf surcharge explicite dans le corps (buy_price)."""
+    with db() as con:
+        line = con.execute("SELECT * FROM import_order_lines WHERE id=?", (lid,)).fetchone()
+        if not line:
+            raise HTTPException(404, "ligne introuvable")
+        line = dict(line)
+        order = dict(con.execute("SELECT * FROM import_orders WHERE id=?", (line["order_id"],)).fetchone())
+        lines = [dict(r) for r in con.execute(
+            "SELECT * FROM import_order_lines WHERE order_id=? ORDER BY sort_order", (line["order_id"],)
+        )]
+    cs = get_card_settings()
+    computed = card_deals_mod.build_import_order_view(order, lines, cs, order["fx_rate"])
+    row = next((r for r in computed["lines"] if r["id"] == lid), None)
+    unit_cost = float(p["buy_price"]) if p.get("buy_price") not in (None, "") else (row["unit_landed_cost"] if row else 0.0)
+    qty = max(1, int(p.get("qty") or line["qty"]))
+    buy_date = str(p.get("buy_date") or date.today().isoformat())[:10]
+    now = datetime.now().isoformat(timespec="seconds")
+    iid = line["item_id"]
+    with db() as con:
+        if iid:
+            con.execute("UPDATE items SET status='owned', buy_price=?, qty=?, buy_date=? WHERE id=?",
+                        (unit_cost, qty, buy_date, iid))
+        else:
+            iid = nid()
+            con.execute(
+                "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, line["name"] or "Item sans nom", line["type"], "JP", "", "", qty, unit_cost, buy_date,
+                 "", "owned", 0.0, now),
+            )
+        con.execute("UPDATE import_order_lines SET item_id=? WHERE id=?", (iid, lid))
+    return {"ok": True, "item_id": iid, "buy_price": unit_cost}
+
+
 # --------------------------------------------------------------------------- export
 
 def _deals_export_list() -> list[dict]:
@@ -1118,12 +1673,32 @@ def _deals_export_list() -> list[dict]:
     return out
 
 
+def _card_deals_export() -> dict:
+    with db() as con:
+        sheets = [dict(r) for r in con.execute("SELECT * FROM card_sheets")]
+        listings = [dict(r) for r in con.execute("SELECT * FROM card_sheet_listings")]
+        orders = [dict(r) for r in con.execute("SELECT * FROM import_orders")]
+        lines = [dict(r) for r in con.execute("SELECT * FROM import_order_lines")]
+    listings_by_sheet: dict[str, list] = {}
+    for l in listings:
+        listings_by_sheet.setdefault(l["sheet_id"], []).append(l)
+    for s in sheets:
+        s["listings"] = listings_by_sheet.get(s["id"], [])
+    lines_by_order: dict[str, list] = {}
+    for l in lines:
+        lines_by_order.setdefault(l["order_id"], []).append(l)
+    for o in orders:
+        o["lines"] = lines_by_order.get(o["id"], [])
+    return {"card_sheets": sheets, "import_orders": orders, "card_deal_settings": get_card_settings()}
+
+
 @app.get("/api/export")
 def api_export():
     st = build_state(snapshot=False)
     return {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
+        **_card_deals_export(),
     }
 
 
@@ -1135,6 +1710,7 @@ def api_export_zip():
     payload = {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
+        **_card_deals_export(),
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1204,6 +1780,10 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute("DELETE FROM snapshots")
             con.execute("DELETE FROM deal_media")
             con.execute("DELETE FROM deals")
+            con.execute("DELETE FROM card_sheet_listings")
+            con.execute("DELETE FROM card_sheets")
+            con.execute("DELETE FROM import_order_lines")
+            con.execute("DELETE FROM import_orders")
         for it in items:
             iid = str(it.get("id") or nid())
             d = clean({**it, "set_name": it.get("set_name") or it.get("set", "")})
@@ -1295,11 +1875,54 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                          int(ph.get("sort_order") or 0),
                          str(ph.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
                     )
+        for cs in data.get("card_sheets") or []:
+            sid = str(cs.get("id") or nid())
+            csd = clean_card_sheet(cs)
+            con.execute(
+                f"INSERT OR REPLACE INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},created_at) "
+                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?)",
+                (sid, *[csd[f] for f in CARD_SHEET_FIELDS],
+                 str(cs.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            for lst in cs.get("listings") or []:
+                lsd = clean_card_listing(lst)
+                con.execute(
+                    "INSERT OR REPLACE INTO card_sheet_listings(id,sheet_id,platform,url,price,shipping,created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (str(lst.get("id") or nid()), sid, lsd["platform"], lsd["url"], lsd["price"], lsd["shipping"],
+                     str(lst.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+                )
+        for io_ in data.get("import_orders") or []:
+            oid = str(io_.get("id") or nid())
+            iod = clean_import_order(io_)
+            con.execute(
+                f"INSERT OR REPLACE INTO import_orders(id,{','.join(IMPORT_ORDER_FIELDS)},"
+                "status,fx_rate,fx_rate_at,received_duty_eur,received_vat_eur,received_carrier_fee_eur,created_at) "
+                f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?,?,?,?,?,?,?)",
+                (oid, *[iod[f] for f in IMPORT_ORDER_FIELDS],
+                 io_.get("status") if io_.get("status") in ("brouillon", "commandee", "recue") else "brouillon",
+                 io_.get("fx_rate"), io_.get("fx_rate_at"),
+                 io_.get("received_duty_eur"), io_.get("received_vat_eur"), io_.get("received_carrier_fee_eur"),
+                 str(io_.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            for i, ln in enumerate(io_.get("lines") or []):
+                lnd = clean_order_line(ln)
+                con.execute(
+                    "INSERT OR REPLACE INTO import_order_lines(id,order_id,item_id,name,type,qty,"
+                    "unit_price_jpy,resale_target_eur,resale_platform,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (str(ln.get("id") or nid()), oid, lnd["item_id"], lnd["name"], lnd["type"], lnd["qty"],
+                     lnd["unit_price_jpy"], lnd["resale_target_eur"], lnd["resale_platform"],
+                     int(ln.get("sort_order") if ln.get("sort_order") is not None else i)),
+                )
     if isinstance(data.get("settings"), dict):
         api_settings(data["settings"])
     if isinstance(data.get("deal_params"), dict):
         put_deal_params(data["deal_params"])
-    return {"ok": True, "items": len(items), "deals": len(data.get("deals") or [])}
+    if isinstance(data.get("card_deal_settings"), dict):
+        put_card_settings(data["card_deal_settings"])
+    return {"ok": True, "items": len(items), "deals": len(data.get("deals") or []),
+            "card_sheets": len(data.get("card_sheets") or []),
+            "import_orders": len(data.get("import_orders") or [])}
 
 
 @app.get("/api/ping")
