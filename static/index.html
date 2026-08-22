@@ -134,6 +134,9 @@ nav.tabbar .fab{position:fixed;right:16px;bottom:calc(60px + env(safe-area-inset
 /* ---- modal / sheet ---- */
 .backdrop{position:fixed;inset:0;background:rgba(6,7,9,.68);z-index:50;display:flex;justify-content:flex-end}
 .backdrop.align-bottom{justify-content:center;align-items:flex-end}
+.lightbox-backdrop{position:fixed;inset:0;background:rgba(6,7,9,.92);z-index:60;
+  display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:16px}
+.lightbox-backdrop img{max-width:94vw;max-height:94vh;object-fit:contain;border-radius:8px;cursor:default}
 .sheet{background:var(--panel);border-left:1px solid var(--line);width:min(560px,100%);height:100%;
   overflow-y:auto;padding:20px}
 .sheet.center{margin:auto;border:1px solid var(--line);border-radius:var(--r);height:auto;
@@ -248,6 +251,12 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       <button class="btn primary" data-action="new-import-order">+ Import Japon</button>
       <button class="btn ghost" data-action="card-settings">Paramètres</button>
     </div>
+    <div class="filters" id="card-filters" style="display:none">
+      <button class="chip" data-card-filter="all" aria-pressed="true">Tout <span id="cf-count-all"></span></button>
+      <button class="chip" data-card-filter="sheet" aria-pressed="false">Fiches carte <span id="cf-count-sheet"></span></button>
+      <button class="chip" data-card-filter="order" aria-pressed="false">Imports Japon <span id="cf-count-order"></span></button>
+      <input class="search" id="card-search" type="search" placeholder="Rechercher…" aria-label="Rechercher une fiche">
+    </div>
 
     <div class="list" id="rows"></div>
   </main>
@@ -257,6 +266,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
 <input type="file" id="file" accept="application/json,.zip" hidden>
 <div id="overlay"></div>
+<div id="lightbox"></div>
 
 <script>
 "use strict";
@@ -265,6 +275,7 @@ const TYPES = {scelle:"Scellé", loose:"Loose", gradee:"Gradée"};
 const TYPE_EMOJI = {scelle:"📦", loose:"🃏", gradee:"🏆"};
 let S = null, filter = "all", query = "", openItem = null, mode = "owned";
 let cardDeals = null, openSheetId = null, openOrderId = null;
+let cardFilter = "all", cardQuery = "";  // état d'écran uniquement, jamais persisté en base
 const BUY_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket", japan:"Proxy Japon"};
 const SELL_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
 
@@ -359,6 +370,11 @@ function renderCardDeals(){
   const host = document.getElementById("rows");
   if(!cardDeals){ host.innerHTML = `<div class="empty">Chargement…</div>`; return; }
   const sheets = cardDeals.card_sheets||[], orders = cardDeals.import_orders||[];
+  const cAll = document.getElementById("cf-count-all"), cS = document.getElementById("cf-count-sheet"), cO = document.getElementById("cf-count-order");
+  if(cAll) cAll.textContent = (sheets.length+orders.length) ? `(${sheets.length+orders.length})` : "";
+  if(cS) cS.textContent = sheets.length ? `(${sheets.length})` : "";
+  if(cO) cO.textContent = orders.length ? `(${orders.length})` : "";
+
   if(!sheets.length && !orders.length){
     host.innerHTML = `<div class="empty"><b>Aucune fiche</b>
       Pars d'une carte et d'un objectif de bénéfice pour connaître ton prix d'achat max, ou décris une commande d'import Japon pour en calculer le coût réel.
@@ -368,10 +384,22 @@ function renderCardDeals(){
       </div></div>`;
     return;
   }
-  const rows = [
+
+  let rows = [
     ...sheets.map(s=>({...s, _kind:"sheet"})),
     ...orders.map(o=>({...o, _kind:"order"})),
-  ].sort((a,b)=> (b.created_at||"").localeCompare(a.created_at||""));
+  ];
+  if(cardFilter==="sheet") rows = rows.filter(r=>r._kind==="sheet");
+  else if(cardFilter==="order") rows = rows.filter(r=>r._kind==="order");
+  if(cardQuery){
+    rows = rows.filter(r=>{
+      const name = r._kind==="sheet" ? (r.item_name||r.name||"") : (r.name||"");
+      return name.toLowerCase().includes(cardQuery);
+    });
+  }
+  rows.sort((a,b)=> (b.created_at||"").localeCompare(a.created_at||""));
+
+  if(!rows.length){ host.innerHTML = `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`; return; }
 
   host.innerHTML = rows.map(r=>{
     if(r._kind==="sheet"){
@@ -380,8 +408,9 @@ function renderCardDeals(){
       const doneTag = r.status==="done" ? `<span class="tag" style="color:var(--accent);border-color:rgba(62,220,123,.35);margin-left:6px">Réalisée</span>`
         : r.status==="archived" ? `<span class="tag dim" style="margin-left:6px">Archivée</span>` : "";
       const nFail = (r.listings||[]).filter(l=>l.verdict===false).length;
+      const thumb = r.photo_thumb_url ? `<img src="${r.photo_thumb_url}" alt="">` : "🃏";
       return `<button class="card-item" data-open-sheet="${r.id}">
-        <div class="card-thumb">🃏</div>
+        <div class="card-thumb">${thumb}</div>
         <div class="card-body">
           <div class="card-title-row"><span class="card-title">${esc(name)}</span>
             <span class="card-value">${prudent?eur(prudent.c_max):"—"}</span></div>
@@ -518,6 +547,14 @@ function openSheet(html, cls){
   if(f) f.focus();
 }
 function closeSheet(){ document.getElementById("overlay").innerHTML=""; openItem=null; }
+
+// Conteneur séparé de #overlay : une lightbox doit pouvoir s'ouvrir PAR-DESSUS
+// une sheet déjà ouverte (photo de fiche carte) sans la détruire dessous.
+function openLightbox(url){
+  document.getElementById("lightbox").innerHTML =
+    `<div class="lightbox-backdrop" data-close-lightbox><img src="${url}" alt=""></div>`;
+}
+function closeLightbox(){ document.getElementById("lightbox").innerHTML=""; }
 
 function purchasesBlock(item){
   if((item.status||"owned")==="watch") return ""; // la veille n'a pas de prix d'achat à répartir
@@ -774,13 +811,37 @@ function cardSheetListingsBlock(sheet){
     <div class="actions" style="justify-content:flex-start"><button class="btn" data-add-listing="${sheet.id}">Ajouter l'annonce</button></div>`;
 }
 
+function cardSheetPhotoBlock(s){
+  if(!s) return "";  // pas d'id avant enregistrement -> upload possible seulement après
+  if(s.photo_url){
+    return `<div style="position:relative;flex-shrink:0">
+      <img src="${s.photo_thumb_url}" alt="" data-open-lightbox="${s.photo_url}"
+        style="width:76px;height:106px;object-fit:cover;border-radius:10px;border:1px solid var(--line);cursor:pointer;display:block">
+      <button class="x" data-replace-sheet-photo="${s.id}" title="Remplacer la photo"
+        style="position:absolute;bottom:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✎</button>
+      <button class="x" data-del-sheet-photo="${s.id}" title="Supprimer la photo"
+        style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✕</button>
+      <input id="sheet-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-sheet="${s.id}" hidden>
+    </div>`;
+  }
+  return `<label style="width:76px;height:106px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+      border:1px dashed var(--line);border-radius:10px;cursor:pointer;color:var(--muted);font-size:22px;margin:0" title="Ajouter une photo">
+    +
+    <input id="sheet-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-sheet="${s.id}" hidden>
+  </label>`;
+}
+
 function cardSheetSheet(id){
   const s = id ? cardDeals.card_sheets.find(x=>x.id===id) : null;
   openSheetId = id;
   const resaleStats = s?.computed?.resale_stats;
   openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">${s?"Fiche carte":"Nouvelle"}</span>
-      <h2>${s?esc(s.item_name||s.name||"Fiche"):"Fiche carte"}</h2></div>
+    <div class="sheet-head">
+      <div style="display:flex;gap:12px;flex:1;min-width:0">
+        ${cardSheetPhotoBlock(s)}
+        <div style="min-width:0"><span class="eyebrow">${s?"Fiche carte":"Nouvelle"}</span>
+          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s?esc(s.item_name||s.name||"Fiche"):"Fiche carte"}</h2></div>
+      </div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
 
     <label><span class="lb">Item lié (optionnel)</span>
@@ -1335,6 +1396,19 @@ document.addEventListener("click", async ev=>{
       await loadCardDeals(); return cardSheetSheet(dl.dataset.sheet);
     }
 
+    // --- Photo de fiche carte ---
+    const lbOpen = t.closest("[data-open-lightbox]");
+    if(lbOpen){ openLightbox(lbOpen.dataset.openLightbox); return; }
+    if(t.hasAttribute("data-close-lightbox")){ closeLightbox(); return; }  // hasAttribute, pas closest : pas la photo elle-même
+    const rsp = t.closest("[data-replace-sheet-photo]");
+    if(rsp){ document.getElementById("sheet-photo-file")?.click(); return; }
+    const dsp = t.closest("[data-del-sheet-photo]");
+    if(dsp){
+      if(!confirm("Supprimer cette photo ?")) return;
+      await api(`/api/card-sheets/${dsp.dataset.delSheetPhoto}/photo`,{method:"DELETE"});
+      await loadCardDeals(); return cardSheetSheet(dsp.dataset.delSheetPhoto);
+    }
+
     // --- Achat-revente : commandes d'import Japon ---
     const so = t.closest("[data-save-order]");
     if(so){
@@ -1469,6 +1543,7 @@ document.addEventListener("click", async ev=>{
       document.getElementById("items-toolbar").style.display = mode==="deals" ? "none" : "flex";
       document.getElementById("filters-items").style.display = mode==="deals" ? "none" : "flex";
       document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
+      document.getElementById("card-filters").style.display = mode==="deals" ? "flex" : "none";
       if(mode==="deals" && !cardDeals) await loadCardDeals();
       return renderRows();
     }
@@ -1478,11 +1553,22 @@ document.addEventListener("click", async ev=>{
       document.querySelectorAll("[data-filter]").forEach(c=>c.setAttribute("aria-pressed", c===chip));
       renderRows();
     }
+    const cfChip = t.closest("[data-card-filter]");
+    if(cfChip){
+      cardFilter = cfChip.dataset.cardFilter;
+      document.querySelectorAll("[data-card-filter]").forEach(c=>c.setAttribute("aria-pressed", c===cfChip));
+      renderRows();
+    }
   }catch(err){ if(err.message!=="401") alert("Échec : "+err.message); }
 });
 
 document.addEventListener("keydown", e=>{
-  if(e.key==="Escape") closeSheet();
+  if(e.key==="Escape"){
+    // Un seul niveau à la fois : si la lightbox est ouverte, Échap la ferme
+    // d'abord (sans emporter la fiche en dessous) ; sinon ferme la sheet.
+    if(document.querySelector(".lightbox-backdrop")) closeLightbox();
+    else closeSheet();
+  }
   if(e.key==="Enter" && e.target.closest(".sheet") && e.target.tagName==="INPUT"){
     const b = document.querySelector(".sheet .btn.primary"); if(b) b.click();
   }
@@ -1490,6 +1576,7 @@ document.addEventListener("keydown", e=>{
   if(row && (e.key==="Enter"||e.key===" ")){ e.preventDefault(); itemSheet(row.dataset.open); }
 });
 document.getElementById("search").addEventListener("input", e=>{ query = e.target.value.toLowerCase().trim(); if(S) renderRows(); });
+document.getElementById("card-search").addEventListener("input", e=>{ cardQuery = e.target.value.toLowerCase().trim(); if(cardDeals) renderRows(); });
 document.getElementById("file").addEventListener("change", async e=>{
   const f = e.target.files[0]; if(!f) return;
   const fd = new FormData(); fd.append("file", f);
@@ -1498,6 +1585,20 @@ document.getElementById("file").addEventListener("change", async e=>{
     await api("/api/import",{method:"POST", body:fd}); await refresh();
   }catch(err){ alert("Import impossible : "+err.message); }
   finally{ e.target.value=""; }
+});
+// Upload de la photo d'une fiche carte (une seule, ajout ou remplacement).
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="sheet-photo-file") return;
+  const sid = e.target.dataset.sheet;
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if(!f || !sid) return;
+  if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); return; }
+  try{
+    const fd = new FormData(); fd.append("file", f);
+    await api(`/api/card-sheets/${sid}/photo`,{method:"POST", body:fd});
+    await loadCardDeals(); return cardSheetSheet(sid);
+  }catch(err){ alert("Upload impossible : "+err.message); }
 });
 // Upload de photos depuis la fiche item (le <input id="photo-file"> vit dans la sheet).
 // Delegation via document pour capturer les changes des inputs re-rendus.

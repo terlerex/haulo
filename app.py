@@ -40,6 +40,7 @@ COOKIE = "pkmn_session"
 
 MEDIA = media_mod.media_dir(DB)  # <dossier DB>/media, jamais /data en dur
 DEAL_MEDIA = MEDIA / "_deals"     # sous-namespace dédié pour ne pas collisionner avec les item_id
+CARD_SHEET_MEDIA = MEDIA / "_card_sheets"  # une seule photo par fiche, même pipeline que items/deals
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -271,6 +272,15 @@ def migrate(con: sqlite3.Connection) -> None:
             # gagnées séparément sont regroupées dans un même colis.
             "fee_proxy_fixed_jpy": "REAL NOT NULL DEFAULT 0",
             "n_orders": "INTEGER NOT NULL DEFAULT 1",
+        },
+        "card_sheets": {
+            # Une seule photo par fiche (pas une galerie) : même pipeline que
+            # les items (media.py), stockée dans CARD_SHEET_MEDIA/<sheet_id>/.
+            # NULL = pas de photo, cas normal et attendu (facultative).
+            "photo_id": "TEXT",
+            "photo_size_bytes": "INTEGER",
+            "photo_width": "INTEGER",
+            "photo_height": "INTEGER",
         },
     }
     for table, cols in add.items():
@@ -1305,6 +1315,11 @@ def _card_sheet_view(row: dict, items_by_id: dict, card_settings: dict, fx_rate:
     d["computed"] = computed
     if d["item_id"] and d["item_id"] in items_by_id:
         d["item_name"] = items_by_id[d["item_id"]]["name"]
+    if d.get("photo_id"):
+        d["photo_url"] = f"/api/card-sheets/{d['id']}/photo"
+        d["photo_thumb_url"] = f"/api/card-sheets/{d['id']}/photo/thumb"
+    else:
+        d["photo_url"] = d["photo_thumb_url"] = None
     return d
 
 
@@ -1386,6 +1401,7 @@ def api_del_card_sheet(sid: str):
     with db() as con:
         con.execute("DELETE FROM card_sheet_listings WHERE sheet_id=?", (sid,))
         con.execute("DELETE FROM card_sheets WHERE id=?", (sid,))
+    media_mod.delete_item_dir(CARD_SHEET_MEDIA, sid)  # pas d'orphelin sur le volume
     return {"ok": True}
 
 
@@ -1460,6 +1476,75 @@ def api_del_card_listing(sid: str, lid: str):
     with db() as con:
         con.execute("DELETE FROM card_sheet_listings WHERE id=? AND sheet_id=?", (lid, sid))
     return {"ok": True}
+
+
+# --- photo de fiche carte (une seule, facultative — mêmes règles que les items) ---
+
+@app.post("/api/card-sheets/{sid}/photo")
+async def api_add_card_sheet_photo(sid: str, file: UploadFile = File(...)):
+    """Upload (ou remplace) l'unique photo d'une fiche. Entièrement facultatif :
+    une fiche sans photo se crée et se calcule normalement."""
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM card_sheets WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "fiche introuvable")
+        old_photo_id = row["photo_id"]
+
+    raw = await file.read()
+    try:
+        info = media_mod.save_photo(CARD_SHEET_MEDIA, sid, raw, (file.content_type or "").strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    with db() as con:
+        con.execute(
+            "UPDATE card_sheets SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? WHERE id=?",
+            (info["id"], info["size_bytes"], info["width"], info["height"], sid),
+        )
+    if old_photo_id:
+        # Remplacement : l'ancien fichier devient orphelin sur le volume si on ne l'efface pas.
+        media_mod.delete_photo(CARD_SHEET_MEDIA, sid, old_photo_id)
+    return {"id": info["id"], "url": f"/api/card-sheets/{sid}/photo",
+            "thumb_url": f"/api/card-sheets/{sid}/photo/thumb"}
+
+
+@app.delete("/api/card-sheets/{sid}/photo")
+def api_del_card_sheet_photo(sid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM card_sheets WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "fiche introuvable")
+        pid = row["photo_id"]
+        con.execute(
+            "UPDATE card_sheets SET photo_id=NULL, photo_size_bytes=NULL, photo_width=NULL, photo_height=NULL WHERE id=?",
+            (sid,),
+        )
+    if pid:
+        media_mod.delete_photo(CARD_SHEET_MEDIA, sid, pid)
+    return {"ok": True}
+
+
+@app.get("/api/card-sheets/{sid}/photo")
+def api_get_card_sheet_photo(sid: str):
+    """Sert l'original. Protégé par le middleware auth global — jamais public."""
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM card_sheets WHERE id=?", (sid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(CARD_SHEET_MEDIA, sid, pid, thumb=False) if pid else None
+    if not path:
+        raise HTTPException(404, "photo introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+@app.get("/api/card-sheets/{sid}/photo/thumb")
+def api_get_card_sheet_thumb(sid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM card_sheets WHERE id=?", (sid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(CARD_SHEET_MEDIA, sid, pid, thumb=True) if pid else None
+    if not path:
+        raise HTTPException(404, "vignette introuvable")
+    return FileResponse(path, media_type="image/webp")
 
 
 # --- commandes d'import Japon ---
@@ -1782,6 +1867,10 @@ def api_export_zip():
             for f in media_mod.list_item_files(DEAL_MEDIA, d["id"]):
                 # Namespace séparé pour les deals : deal_media/<deal_id>/<filename>
                 z.write(f, arcname=f"deal_media/{d['id']}/{f.name}")
+        for cs in payload["card_sheets"]:
+            for f in media_mod.list_item_files(CARD_SHEET_MEDIA, cs["id"]):
+                # Namespace séparé pour les fiches carte : card_sheet_media/<sheet_id>/<filename>
+                z.write(f, arcname=f"card_sheet_media/{cs['id']}/{f.name}")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -1803,6 +1892,7 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
 
     zip_photos: dict[str, dict[str, bytes]] = {}       # {item_id: {filename: bytes}}
     zip_deal_photos: dict[str, dict[str, bytes]] = {}  # {deal_id: {filename: bytes}}
+    zip_card_photos: dict[str, dict[str, bytes]] = {}  # {sheet_id: {filename: bytes}}
     if raw[:4] == b"PK\x03\x04":  # signature ZIP
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -1819,6 +1909,9 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     elif len(parts) == 3 and parts[0] == "deal_media" and parts[2]:
                         did, fname = parts[1], parts[2]
                         zip_deal_photos.setdefault(did, {})[fname] = z.read(name)
+                    elif len(parts) == 3 and parts[0] == "card_sheet_media" and parts[2]:
+                        sid, fname = parts[1], parts[2]
+                        zip_card_photos.setdefault(sid, {})[fname] = z.read(name)
         except zipfile.BadZipFile:
             raise HTTPException(400, "ZIP invalide")
     else:
@@ -1937,10 +2030,31 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
         for cs in data.get("card_sheets") or []:
             sid = str(cs.get("id") or nid())
             csd = clean_card_sheet(cs)
+            # Photo facultative : ne restaure la référence en base QUE si le
+            # fichier est réellement présent dans le ZIP (comme pour les items).
+            # Import JSON pur, ou ZIP incomplet/édité à la main -> photo_id
+            # reste NULL, jamais de référence pointant vers un fichier absent.
+            photo_id = photo_size = photo_w = photo_h = None
+            src_photo_id = cs.get("photo_id")
+            if src_photo_id:
+                files_for_sheet = zip_card_photos.get(sid, {})
+                fname, thumb_name = f"{src_photo_id}.webp", f"{src_photo_id}.thumb.webp"
+                if fname in files_for_sheet:
+                    d = CARD_SHEET_MEDIA / sid
+                    d.mkdir(parents=True, exist_ok=True)
+                    (d / fname).write_bytes(files_for_sheet[fname])
+                    if thumb_name in files_for_sheet:
+                        (d / thumb_name).write_bytes(files_for_sheet[thumb_name])
+                    photo_id = src_photo_id
+                    photo_size = cs.get("photo_size_bytes")
+                    photo_w = cs.get("photo_width")
+                    photo_h = cs.get("photo_height")
             con.execute(
-                f"INSERT OR REPLACE INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},created_at) "
-                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?)",
+                f"INSERT OR REPLACE INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},"
+                "photo_id,photo_size_bytes,photo_width,photo_height,created_at) "
+                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?,?,?,?,?)",
                 (sid, *[csd[f] for f in CARD_SHEET_FIELDS],
+                 photo_id, photo_size, photo_w, photo_h,
                  str(cs.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for lst in cs.get("listings") or []:
