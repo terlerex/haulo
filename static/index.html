@@ -978,12 +978,17 @@ function importOrderSheet(id){
     <hr class="sep">
     <span class="eyebrow">Frais (par commande)</span>
     <div class="f3" style="margin-top:8px">
+      <label><span class="lb">Commission proxy — fixe (¥/commande)</span><input id="io-fee-proxy-fixed" type="number" min="0" step="1" value="${o?.fee_proxy_fixed_jpy??0}" ${editable?"":"disabled"}></label>
       <label><span class="lb">Commission proxy (%)</span><input id="io-fee-proxy" type="number" min="0" step="0.1" value="${o?.fee_proxy_pct??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Nombre de commandes</span><input id="io-n-orders" type="number" min="1" step="1" value="${o?.n_orders??1}" ${editable?"":"disabled"}></label>
+    </div>
+    <p class="note">Le forfait fixe est multiplié par le nombre de commandes : plusieurs enchères gagnées séparément, regroupées dans le même colis, restent facturées une fois chacune côté proxy.</p>
+    <div class="f3">
       <label><span class="lb">Port domestique JP (¥)</span><input id="io-fee-domestic" type="number" min="0" step="1" value="${o?.fee_domestic_jpy??0}" ${editable?"":"disabled"}></label>
       <label><span class="lb">Consolidation (¥)</span><input id="io-fee-consolidation" type="number" min="0" step="1" value="${o?.fee_consolidation_jpy??0}" ${editable?"":"disabled"}></label>
+      <label><span class="lb">Port international (¥)</span><input id="io-fee-intl" type="number" min="0" step="1" value="${o?.fee_intl_shipping_jpy??0}" ${editable?"":"disabled"}></label>
     </div>
     <div class="f3">
-      <label><span class="lb">Port international (¥)</span><input id="io-fee-intl" type="number" min="0" step="1" value="${o?.fee_intl_shipping_jpy??0}" ${editable?"":"disabled"}></label>
       <label><span class="lb">Frais de paiement (%)</span><input id="io-fee-payment" type="number" min="0" step="0.1" value="${o?.fee_payment_pct??0}" ${editable?"":"disabled"}></label>
       <label><span class="lb">Seuil alerte marge (%)</span><input id="io-lowmargin" type="number" min="0" step="1" value="${o?.low_margin_alert_pct??""}" placeholder="${cardDeals.settings.low_margin_alert_pct}" ${editable?"":"disabled"}></label>
     </div>
@@ -1338,7 +1343,8 @@ document.addEventListener("click", async ev=>{
       const body = {
         name:g("io-name"), supplier:g("io-supplier"), order_date:g("io-date"), split_mode:g("io-split"),
         fx_spread_pct:g("io-fxspread")||null, ioss_enabled:gc("io-ioss"),
-        fee_proxy_pct:g("io-fee-proxy")||0, fee_domestic_jpy:g("io-fee-domestic")||0,
+        fee_proxy_pct:g("io-fee-proxy")||0, fee_proxy_fixed_jpy:g("io-fee-proxy-fixed")||0,
+        n_orders:g("io-n-orders")||1, fee_domestic_jpy:g("io-fee-domestic")||0,
         fee_consolidation_jpy:g("io-fee-consolidation")||0, fee_intl_shipping_jpy:g("io-fee-intl")||0,
         fee_payment_pct:g("io-fee-payment")||0, low_margin_alert_pct:g("io-lowmargin")||null,
         vat_rate_pct:g("io-vat")||null, duty_rate_pct:g("io-duty")||null, carrier_fee_eur:g("io-carrier")||null,

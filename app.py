@@ -265,6 +265,12 @@ def migrate(con: sqlite3.Connection) -> None:
             # saisi a posteriori (relevé bancaire) pour calculer le taux de
             # change effectif obtenu, spread compris.
             "received_debit_eur": "REAL",
+            # Forfait fixe du proxy, ¥ par commande (ex. Buyee facture 500¥
+            # par commande quel que soit le montant — un % seul ne le modélise
+            # pas). Multiplié par n_orders si plusieurs commandes/enchères
+            # gagnées séparément sont regroupées dans un même colis.
+            "fee_proxy_fixed_jpy": "REAL NOT NULL DEFAULT 0",
+            "n_orders": "INTEGER NOT NULL DEFAULT 1",
         },
     }
     for table, cols in add.items():
@@ -1459,7 +1465,8 @@ def api_del_card_listing(sid: str, lid: str):
 # --- commandes d'import Japon ---
 
 IMPORT_ORDER_FIELDS = ["name", "order_date", "supplier", "fx_spread_pct",
-                        "fee_proxy_pct", "fee_domestic_jpy", "fee_consolidation_jpy",
+                        "fee_proxy_pct", "fee_proxy_fixed_jpy", "n_orders",
+                        "fee_domestic_jpy", "fee_consolidation_jpy",
                         "fee_intl_shipping_jpy", "fee_payment_pct",
                         "vat_rate_pct", "duty_rate_pct", "carrier_fee_eur",
                         "ioss_enabled", "split_mode", "low_margin_alert_pct", "notes"]
@@ -1475,6 +1482,8 @@ def clean_import_order(p: dict) -> dict:
         "supplier": str(p.get("supplier") or "Buyee")[:80],
         "fx_spread_pct": numopt("fx_spread_pct"),
         "fee_proxy_pct": max(0.0, float(p.get("fee_proxy_pct") or 0)),
+        "fee_proxy_fixed_jpy": max(0.0, float(p.get("fee_proxy_fixed_jpy") or 0)),
+        "n_orders": max(1, int(p.get("n_orders") or 1)),
         "fee_domestic_jpy": max(0.0, float(p.get("fee_domestic_jpy") or 0)),
         "fee_consolidation_jpy": max(0.0, float(p.get("fee_consolidation_jpy") or 0)),
         "fee_intl_shipping_jpy": max(0.0, float(p.get("fee_intl_shipping_jpy") or 0)),

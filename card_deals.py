@@ -314,7 +314,7 @@ def order_needs_fx(order: dict, lines: list[dict]) -> bool:
         currency = "EUR" if (l.get("unit_currency") or "JPY").upper() == "EUR" else "JPY"
         if currency == "JPY" and float(l.get("unit_price_jpy") or 0) * int(l.get("qty") or 1) > 0:
             return True
-    for k in ("fee_domestic_jpy", "fee_consolidation_jpy", "fee_intl_shipping_jpy"):
+    for k in ("fee_domestic_jpy", "fee_consolidation_jpy", "fee_intl_shipping_jpy", "fee_proxy_fixed_jpy"):
         if float(order.get(k) or 0) > 0:
             return True
     return False
@@ -383,16 +383,24 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
         total_articles_eur += unit_eur * int(l["qty"])
 
     fee_proxy = float(order.get("fee_proxy_pct") if order.get("fee_proxy_pct") is not None else 0)
+    # Forfait fixe par commande côté proxy (ex. Buyee facture 500¥ par commande,
+    # quel que soit le montant — un pourcentage seul ne modélise pas ça) x le
+    # nombre de commandes groupées dans le même colis (plusieurs enchères
+    # gagnées séparément = plusieurs forfaits, même consolidées à l'envoi).
+    fee_proxy_fixed_jpy = float(order.get("fee_proxy_fixed_jpy") or 0)
+    n_orders = max(1, int(order.get("n_orders") or 1))
     fee_domestic_jpy = float(order.get("fee_domestic_jpy") or 0)
     fee_consolidation_jpy = float(order.get("fee_consolidation_jpy") or 0)
     fee_intl_jpy = float(order.get("fee_intl_shipping_jpy") or 0)
     fee_domestic = convert_jpy(fee_domestic_jpy, rate, spread) if rate else 0.0
     fee_consolidation = convert_jpy(fee_consolidation_jpy, rate, spread) if rate else 0.0
     fee_intl = convert_jpy(fee_intl_jpy, rate, spread) if rate else 0.0
+    fee_proxy_fixed_total_jpy = fee_proxy_fixed_jpy * n_orders
+    fee_proxy_fixed = convert_jpy(fee_proxy_fixed_total_jpy, rate, spread) if rate else 0.0
     fee_payment_pct = float(order.get("fee_payment_pct") if order.get("fee_payment_pct") is not None else 0)
-    jpy_paid_total += fee_domestic_jpy + fee_consolidation_jpy + fee_intl_jpy
+    jpy_paid_total += fee_domestic_jpy + fee_consolidation_jpy + fee_intl_jpy + fee_proxy_fixed_total_jpy
 
-    proxy_commission_eur = total_articles_eur * fee_proxy / 100
+    proxy_commission_eur = total_articles_eur * fee_proxy / 100 + fee_proxy_fixed
     payment_fee_eur = (total_articles_eur + fee_domestic + fee_consolidation + fee_intl) * fee_payment_pct / 100
     # Frais de service (non taxables, hors assiette douane) : commission proxy,
     # port domestique JP, consolidation, frais de paiement. Distincts du port
