@@ -307,6 +307,19 @@ def tax_cascade(valeur_douane: float, duty_rate_pct: float, vat_rate_pct: float,
     }
 
 
+def order_needs_fx(order: dict, lines: list[dict]) -> bool:
+    """Une commande entièrement saisie en € n'a besoin d'aucun taux de change :
+    elle doit pouvoir être validée sans le moindre appel réseau à frankfurter.dev."""
+    for l in lines:
+        currency = "EUR" if (l.get("unit_currency") or "JPY").upper() == "EUR" else "JPY"
+        if currency == "JPY" and float(l.get("unit_price_jpy") or 0) * int(l.get("qty") or 1) > 0:
+            return True
+    for k in ("fee_domestic_jpy", "fee_consolidation_jpy", "fee_intl_shipping_jpy"):
+        if float(order.get(k) or 0) > 0:
+            return True
+    return False
+
+
 def _round_alloc(target: float, weights: list[float]) -> list[float]:
     """Répartit `target` (déjà arrondi au centime) au prorata de `weights`,
     arrondi ligne par ligne, reliquat d'arrondi ajouté à la ligne de plus
@@ -351,16 +364,33 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
 
     enriched = []
     total_articles_eur = 0.0
+    # Montant total réellement exprimé en ¥ (lignes ¥ + frais ¥ de la commande) :
+    # sert de base au taux de change EFFECTIF (débit réel / ce montant), donc ne
+    # doit JAMAIS inclure une ligne saisie directement en € (montant réel, pas
+    # une conversion — il ne "consomme" aucun yen au taux de la commande).
+    jpy_paid_total = 0.0
     for l in lines:
-        unit_eur = convert_jpy(float(l["unit_price_jpy"] or 0), rate, spread) if rate else 0.0
-        enriched.append({**l, "unit_price_eur": round(unit_eur, 4)})
+        currency = "EUR" if (l.get("unit_currency") or "JPY").upper() == "EUR" else "JPY"
+        if currency == "EUR":
+            # Montant réel, saisi directement en €. Jamais reconverti, jamais
+            # affecté par un changement de taux : ce n'est pas une estimation.
+            unit_eur = float(l.get("unit_price_eur") or 0)
+        else:
+            unit_price_jpy = float(l.get("unit_price_jpy") or 0)
+            unit_eur = convert_jpy(unit_price_jpy, rate, spread) if rate else 0.0
+            jpy_paid_total += unit_price_jpy * int(l["qty"])
+        enriched.append({**l, "unit_currency": currency, "unit_price_eur": round(unit_eur, 4)})
         total_articles_eur += unit_eur * int(l["qty"])
 
     fee_proxy = float(order.get("fee_proxy_pct") if order.get("fee_proxy_pct") is not None else 0)
-    fee_domestic = convert_jpy(float(order.get("fee_domestic_jpy") or 0), rate, spread) if rate else 0.0
-    fee_consolidation = convert_jpy(float(order.get("fee_consolidation_jpy") or 0), rate, spread) if rate else 0.0
-    fee_intl = convert_jpy(float(order.get("fee_intl_shipping_jpy") or 0), rate, spread) if rate else 0.0
+    fee_domestic_jpy = float(order.get("fee_domestic_jpy") or 0)
+    fee_consolidation_jpy = float(order.get("fee_consolidation_jpy") or 0)
+    fee_intl_jpy = float(order.get("fee_intl_shipping_jpy") or 0)
+    fee_domestic = convert_jpy(fee_domestic_jpy, rate, spread) if rate else 0.0
+    fee_consolidation = convert_jpy(fee_consolidation_jpy, rate, spread) if rate else 0.0
+    fee_intl = convert_jpy(fee_intl_jpy, rate, spread) if rate else 0.0
     fee_payment_pct = float(order.get("fee_payment_pct") if order.get("fee_payment_pct") is not None else 0)
+    jpy_paid_total += fee_domestic_jpy + fee_consolidation_jpy + fee_intl_jpy
 
     proxy_commission_eur = total_articles_eur * fee_proxy / 100
     payment_fee_eur = (total_articles_eur + fee_domestic + fee_consolidation + fee_intl) * fee_payment_pct / 100
@@ -432,11 +462,35 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
 
     line_rows.sort(key=lambda r: (r["profit_pct"] is None, -(r["profit_pct"] or 0)))
 
-    grand_total = total_articles_eur + total_extra_to_allocate
+    # Reconstruit depuis les MÊMES totaux arrondis que ceux passés à _round_alloc
+    # pour la répartition par ligne (round(total_articles_eur,2) et
+    # round(total_extra_to_allocate,2)) — pas depuis les valeurs brutes non
+    # arrondies, sinon un centime peut se perdre entre "arrondir la somme" et
+    # "sommer les arrondis" et grand_total_eur ne correspond plus à sum_check.
+    grand_total = round(total_articles_eur, 2) + round(total_extra_to_allocate, 2)
     resale_total = sum(r["net_after_fees"] or 0 for r in line_rows)
     profit_total = sum(r["profit_total"] or 0 for r in line_rows)
     low_threshold = _override("low_margin_alert_pct", settings["low_margin_alert_pct"])
     n_flagged = sum(1 for r in line_rows if r["profit_pct"] is not None and r["profit_pct"] < low_threshold)
+
+    # Taux de change effectif : comparaison entre ce que le taux théorique
+    # (ECB brut) + spread supposé auraient donné, et ce qui a été RÉELLEMENT
+    # débité en € pour la part de la commande exprimée en ¥ (lignes ¥ + frais
+    # ¥). Les lignes saisies directement en € ne participent à aucun taux :
+    # elles ne sont pas dans jpy_paid_total.
+    debit_check = None
+    received_debit = order.get("received_debit_eur")
+    if received_debit not in (None, "") and jpy_paid_total > 0:
+        received_debit = float(received_debit)
+        effective_rate = received_debit / jpy_paid_total
+        debit_check = {
+            "received_debit_eur": round(received_debit, 2),
+            "jpy_amount": round(jpy_paid_total, 0),
+            "theoretical_rate": rate,
+            "assumed_rate": round(rate * (1 + spread / 100), 6) if rate else None,
+            "effective_rate": round(effective_rate, 6),
+            "effective_spread_pct": round((effective_rate / rate - 1) * 100, 2) if rate else None,
+        }
 
     return {
         "fx_rate": rate, "fx_spread_pct": spread,
@@ -456,4 +510,6 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
         "lines": line_rows,
         "using_received_amounts": use_received,
         "sum_check": round(sum(r["landed_total"] for r in line_rows), 2),
+        "jpy_paid_total": round(jpy_paid_total, 0),
+        "debit_check": debit_check,
     }

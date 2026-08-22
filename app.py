@@ -251,6 +251,21 @@ def migrate(con: sqlite3.Connection) -> None:
             # la moyenne). Le coût total = price + shipping est calculé côté build_state.
             "shipping": "REAL NOT NULL DEFAULT 0",
         },
+        "import_order_lines": {
+            # Devise de SAISIE de la ligne. Défaut 'JPY' : toute ligne déjà en
+            # base avant cette migration reste en ¥ avec la même valeur qu'avant
+            # (unit_price_jpy inchangé) — comportement strictement identique.
+            "unit_currency": "TEXT NOT NULL DEFAULT 'JPY'",
+            # Montant réel en € si unit_currency='EUR' — jamais reconverti,
+            # jamais recalculé au taux de change (ce n'est pas une estimation).
+            "unit_price_eur": "REAL",
+        },
+        "import_orders": {
+            # Montant réellement débité en € pour la part ¥ de la commande,
+            # saisi a posteriori (relevé bancaire) pour calculer le taux de
+            # change effectif obtenu, spread compris.
+            "received_debit_eur": "REAL",
+        },
     }
     for table, cols in add.items():
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -1544,13 +1559,36 @@ def api_set_order_status(oid: str, p: dict = Body(...)):
             raise HTTPException(404, "commande introuvable")
         d = dict(row)
         if new_status == "commandee" and d["status"] == "brouillon":
-            rate = d["fx_rate"] or fetch_jpy_eur_rate()
-            if rate is None:
-                raise HTTPException(503, "taux de change indisponible : réessaie, ou repasse en brouillon pour raffraîchir plus tard")
+            lines = [dict(r) for r in con.execute(
+                "SELECT * FROM import_order_lines WHERE order_id=?", (oid,)
+            )]
+            # Une commande entièrement saisie en € n'a besoin d'aucun taux de
+            # change : elle doit pouvoir être validée même si frankfurter.dev
+            # est injoignable (aucun appel réseau requis dans ce cas).
+            if card_deals_mod.order_needs_fx(d, lines):
+                rate = d["fx_rate"] or fetch_jpy_eur_rate()
+                if rate is None:
+                    raise HTTPException(503, "taux de change indisponible : réessaie, ou repasse en brouillon pour raffraîchir plus tard")
+            else:
+                rate = d["fx_rate"]
             con.execute("UPDATE import_orders SET status=?, fx_rate=?, fx_rate_at=? WHERE id=?",
                         (new_status, rate, d["fx_rate_at"] or datetime.now().isoformat(timespec="seconds"), oid))
         else:
             con.execute("UPDATE import_orders SET status=? WHERE id=?", (new_status, oid))
+    return {"ok": True}
+
+
+@app.put("/api/import-orders/{oid}/debit")
+def api_set_order_debit(oid: str, p: dict = Body(...)):
+    """Montant réellement débité en € (relevé bancaire) : éditable à tout
+    moment, quel que soit le statut — sert uniquement à calculer le taux de
+    change effectif obtenu, n'affecte aucun autre calcul de la commande."""
+    v = p.get("received_debit_eur")
+    val = max(0.0, float(v)) if v not in (None, "") else None
+    with db() as con:
+        cur = con.execute("UPDATE import_orders SET received_debit_eur=? WHERE id=?", (val, oid))
+        if not cur.rowcount:
+            raise HTTPException(404, "commande introuvable")
     return {"ok": True}
 
 
@@ -1572,12 +1610,17 @@ def api_receive_order(oid: str, p: dict = Body(...)):
 
 
 def clean_order_line(p: dict) -> dict:
+    currency = "EUR" if p.get("unit_currency") == "EUR" else "JPY"
     return {
         "item_id": (str(p["item_id"]) if p.get("item_id") else None),
         "name": str(p.get("name", ""))[:200],
         "type": p.get("type") if p.get("type") in ("scelle", "loose", "gradee") else "scelle",
         "qty": max(1, int(p.get("qty") or 1)),
+        "unit_currency": currency,
         "unit_price_jpy": max(0.0, float(p.get("unit_price_jpy") or 0)),
+        # Montant réel, saisi et conservé tel quel — jamais recalculé au taux
+        # de change (cf. card_deals.build_import_order_view).
+        "unit_price_eur": (max(0.0, float(p["unit_price_eur"])) if p.get("unit_price_eur") not in (None, "") else None),
         "resale_target_eur": (float(p["resale_target_eur"]) if p.get("resale_target_eur") not in (None, "") else None),
         "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else None,
     }
@@ -1596,10 +1639,11 @@ def api_add_order_line(oid: str, p: dict = Body(...)):
             "SELECT COALESCE(MAX(sort_order), -1) AS m FROM import_order_lines WHERE order_id=?", (oid,)
         ).fetchone()["m"]
         con.execute(
-            "INSERT INTO import_order_lines(id,order_id,item_id,name,type,qty,unit_price_jpy,resale_target_eur,resale_platform,sort_order)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (lid, oid, d["item_id"], d["name"], d["type"], d["qty"], d["unit_price_jpy"],
-             d["resale_target_eur"], d["resale_platform"], maxo + 1),
+            "INSERT INTO import_order_lines(id,order_id,item_id,name,type,qty,unit_currency,"
+            "unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (lid, oid, d["item_id"], d["name"], d["type"], d["qty"], d["unit_currency"],
+             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"], maxo + 1),
         )
     return {"id": lid}
 
@@ -1609,10 +1653,10 @@ def api_edit_order_line(lid: str, p: dict = Body(...)):
     d = clean_order_line(p)
     with db() as con:
         cur = con.execute(
-            "UPDATE import_order_lines SET item_id=?,name=?,type=?,qty=?,unit_price_jpy=?,"
-            "resale_target_eur=?,resale_platform=? WHERE id=?",
-            (d["item_id"], d["name"], d["type"], d["qty"], d["unit_price_jpy"],
-             d["resale_target_eur"], d["resale_platform"], lid),
+            "UPDATE import_order_lines SET item_id=?,name=?,type=?,qty=?,unit_currency=?,"
+            "unit_price_jpy=?,unit_price_eur=?,resale_target_eur=?,resale_platform=? WHERE id=?",
+            (d["item_id"], d["name"], d["type"], d["qty"], d["unit_currency"],
+             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"], lid),
         )
         if not cur.rowcount:
             raise HTTPException(404, "ligne introuvable")
@@ -1903,21 +1947,25 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             iod = clean_import_order(io_)
             con.execute(
                 f"INSERT OR REPLACE INTO import_orders(id,{','.join(IMPORT_ORDER_FIELDS)},"
-                "status,fx_rate,fx_rate_at,received_duty_eur,received_vat_eur,received_carrier_fee_eur,created_at) "
-                f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?,?,?,?,?,?,?)",
+                "status,fx_rate,fx_rate_at,received_duty_eur,received_vat_eur,received_carrier_fee_eur,"
+                "received_debit_eur,created_at) "
+                f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?,?,?,?,?,?,?,?)",
                 (oid, *[iod[f] for f in IMPORT_ORDER_FIELDS],
                  io_.get("status") if io_.get("status") in ("brouillon", "commandee", "recue") else "brouillon",
                  io_.get("fx_rate"), io_.get("fx_rate_at"),
                  io_.get("received_duty_eur"), io_.get("received_vat_eur"), io_.get("received_carrier_fee_eur"),
+                 io_.get("received_debit_eur"),
                  str(io_.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for i, ln in enumerate(io_.get("lines") or []):
                 lnd = clean_order_line(ln)
                 con.execute(
                     "INSERT OR REPLACE INTO import_order_lines(id,order_id,item_id,name,type,qty,"
-                    "unit_price_jpy,resale_target_eur,resale_platform,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "unit_currency,unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (str(ln.get("id") or nid()), oid, lnd["item_id"], lnd["name"], lnd["type"], lnd["qty"],
-                     lnd["unit_price_jpy"], lnd["resale_target_eur"], lnd["resale_platform"],
+                     lnd["unit_currency"], lnd["unit_price_jpy"], lnd["unit_price_eur"],
+                     lnd["resale_target_eur"], lnd["resale_platform"],
                      int(ln.get("sort_order") if ln.get("sort_order") is not None else i)),
                 )
     if isinstance(data.get("settings"), dict):

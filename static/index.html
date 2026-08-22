@@ -864,19 +864,39 @@ function cardSheetRealizeForm(id){
   `,"center");
 }
 
+function lineAmountLabel(l){
+  const jpyTxt = l.unit_price_jpy ? `${Math.round(l.unit_price_jpy).toLocaleString('fr-FR')} ¥` : "";
+  if(l.unit_currency==="EUR"){
+    return `${eur(l.unit_price_eur)} <span class="dim" style="font-size:10px">(saisie €)</span>`;
+  }
+  if(!l.unit_price_eur && l.unit_price_jpy){
+    return `${jpyTxt} <span class="dim" style="font-size:10px">(saisie ¥ · taux indisponible)</span>`;
+  }
+  return `${jpyTxt}<span class="dim" style="font-size:10px"> (saisie ¥)</span>${l.unit_price_eur?` ≈ ${eur(l.unit_price_eur)}`:""}`;
+}
+
 function orderLineRow(l, order){
   const flagged = l.profit_pct!=null && l.profit_pct < order.computed.low_margin_alert_pct;
   return `<div class="comp" style="grid-template-columns:1fr auto auto auto">
-      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${l.unit_price_jpy?Math.round(l.unit_price_jpy).toLocaleString('fr-FR')+' ¥ · ':""}coût ${eur(l.unit_landed_cost)}</span></span>
+      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${lineAmountLabel(l)} · coût ${eur(l.unit_landed_cost)}</span></span>
       <span class="p">${eur(l.unit_landed_cost)}</span>
       <span class="${l.profit_pct==null?'dim':flagged?'loss':'gain'}" style="font-size:12px">${l.profit_pct!=null?pct(l.profit_pct):"—"}</span>
       <span>
-        <button class="x" data-toggle-line="${l.id}" title="Détail (revente visée)">⚙</button>
+        <button class="x" data-toggle-line="${l.id}" title="Détail (devise, montant, revente visée)">⚙</button>
         ${order.status==="recue" && !l.item_id ? `<button class="x" data-realize-line="${l.id}" title="Basculer au portefeuille">↦</button>` : ""}
         <button class="x" data-del-line="${l.id}" title="Supprimer">✕</button>
       </span>
     </div>
     <div id="line-edit-${l.id}" style="display:none;margin:0 0 10px;padding:10px;background:var(--panel2);border-radius:var(--r-sm)">
+      <div class="f2" style="margin:0 0 10px">
+        <label><span class="lb">Devise de saisie</span><select id="ole-currency-${l.id}">
+          <option value="JPY" ${l.unit_currency!=="EUR"?"selected":""}>¥</option>
+          <option value="EUR" ${l.unit_currency==="EUR"?"selected":""}>€</option>
+        </select></label>
+        <label><span class="lb">Montant</span><input id="ole-amount-${l.id}" type="number" min="0"
+          step="${l.unit_currency==="EUR"?"0.01":"1"}"
+          value="${l.unit_currency==="EUR"?(l.unit_price_eur??""):(l.unit_price_jpy??"")}"></label>
+      </div>
       <div class="f2" style="margin:0 0 10px">
         <label><span class="lb">Revente visée (€)</span><input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
         <label><span class="lb">Plateforme</span><select id="ole-platform-${l.id}">
@@ -886,6 +906,26 @@ function orderLineRow(l, order){
       </div>
       <button class="btn" data-save-line-detail="${l.id}" data-order="${order.id}" style="width:100%">Enregistrer le détail</button>
     </div>`;
+}
+
+function debitCheckBlock(o){
+  const dc = o.computed.debit_check;
+  return `<div style="margin-top:12px">
+    <span class="eyebrow">Montant réellement débité (relevé bancaire)</span>
+    <div class="f2" style="margin-top:8px">
+      <label><span class="lb">Débité (€)</span><input id="io-debit" type="number" min="0" step="0.01" value="${o.received_debit_eur??""}"></label>
+      <div style="display:flex;align-items:flex-end;padding-bottom:12px">
+        <button class="btn" data-save-debit="${o.id}" style="width:100%">Enregistrer</button>
+      </div>
+    </div>
+    ${dc ? `
+      <div class="comp" style="grid-template-columns:1fr auto"><span>Montant ¥ concerné</span><span class="p">${Math.round(dc.jpy_amount).toLocaleString('fr-FR')} ¥</span></div>
+      <div class="comp" style="grid-template-columns:1fr auto"><span>Taux théorique (ECB brut)</span><span class="p">${dc.theoretical_rate?dc.theoretical_rate.toFixed(6):"—"}</span></div>
+      <div class="comp" style="grid-template-columns:1fr auto"><span>Taux supposé (+ spread des réglages)</span><span class="p">${dc.assumed_rate?dc.assumed_rate.toFixed(6):"—"}</span></div>
+      <div class="comp" style="grid-template-columns:1fr auto"><span><b>Taux effectif obtenu</b></span><span class="p"><b>${dc.effective_rate.toFixed(6)}</b></span></div>
+      <p class="note">Spread réellement constaté vs le taux théorique : ${dc.effective_spread_pct!=null?pct(dc.effective_spread_pct):"—"}.</p>
+    ` : `<p class="note">Renseigne le montant débité pour comparer le taux réellement obtenu au taux théorique. Sans ligne en ¥ dans la commande, aucune comparaison n'est possible.</p>`}
+  </div>`;
 }
 
 function receiveBlock(o){
@@ -933,6 +973,7 @@ function importOrderSheet(id){
       <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="io-ioss" ${o?.ioss_enabled?"checked":""} style="width:auto;min-height:auto" ${editable?"":"disabled"}>
         <span>Sous IOSS (TVA réglée au paiement)</span></label>
     </div>
+    ${o ? debitCheckBlock(o) : ""}
 
     <hr class="sep">
     <span class="eyebrow">Frais (par commande)</span>
@@ -978,11 +1019,17 @@ function importOrderSheet(id){
 
     <hr class="sep">
     <span class="eyebrow">Cartes (${o.lines.length}) — triées par bénéfice</span>
-    <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne. Ajoute au moins le nom, la quantité et le prix en ¥.</p>`}</div>
+    <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne. Ajoute au moins le nom, la quantité et le prix (¥ par défaut, ou € si tu connais le montant réel).</p>`}</div>
     <div class="f3">
       <label><span class="lb">Nom</span><input id="ol-name" placeholder="Pikachu promo"></label>
       <label><span class="lb">Quantité</span><input id="ol-qty" type="number" min="1" step="1" value="1"></label>
-      <label><span class="lb">Prix unitaire (¥)</span><input id="ol-price" type="number" min="0" step="1" placeholder="0"></label>
+      <label><span class="lb">Devise</span><select id="ol-currency">
+        <option value="JPY">¥</option>
+        <option value="EUR">€</option>
+      </select></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb" id="ol-price-lb">Prix unitaire (¥)</span><input id="ol-price" type="number" min="0" step="1" placeholder="0"></label>
     </div>
     <div class="actions" style="justify-content:flex-start"><button class="btn" data-add-line="${o.id}">+ Ajouter la ligne</button></div>
 
@@ -996,6 +1043,12 @@ function importOrderSheet(id){
       ${editable ? `<button class="btn primary" data-save-order="${o?.id||""}">Enregistrer</button>` : ""}
     </div>
   `,"center");
+  const curSel = document.getElementById("ol-currency");
+  if(curSel) curSel.addEventListener("change", ()=>{
+    const eurMode = curSel.value==="EUR";
+    document.getElementById("ol-price-lb").textContent = eurMode ? "Prix unitaire (€)" : "Prix unitaire (¥)";
+    document.getElementById("ol-price").step = eurMode ? "0.01" : "1";
+  });
 }
 
 function cardSettingsForm(){
@@ -1323,10 +1376,12 @@ document.addEventListener("click", async ev=>{
     if(addl){
       const name = document.getElementById("ol-name").value.trim();
       const price = document.getElementById("ol-price").value;
+      const currency = document.getElementById("ol-currency").value;
       if(!name) return document.getElementById("ol-name").focus();
       if(!(parseFloat(price)>=0)) return document.getElementById("ol-price").focus();
-      await api(`/api/import-orders/${addl.dataset.addLine}/lines`,{json:{
-        name, qty:document.getElementById("ol-qty").value||1, unit_price_jpy:price}});
+      const body = {name, qty:document.getElementById("ol-qty").value||1, unit_currency:currency};
+      if(currency==="EUR") body.unit_price_eur = price; else body.unit_price_jpy = price;
+      await api(`/api/import-orders/${addl.dataset.addLine}/lines`,{json:body});
       await loadCardDeals(); return importOrderSheet(addl.dataset.addLine);
     }
     const tgl = t.closest("[data-toggle-line]");
@@ -1341,11 +1396,23 @@ document.addEventListener("click", async ev=>{
       const order = cardDeals.import_orders.find(x=>x.id===oid);
       const line = order?.lines.find(l=>l.id===lid);
       if(!line) return;
-      await api(`/api/import-order-lines/${lid}`,{method:"PUT",json:{
-        name:line.name, type:line.type, qty:line.qty, unit_price_jpy:line.unit_price_jpy,
+      const currency = document.getElementById("ole-currency-"+lid).value;
+      const amount = document.getElementById("ole-amount-"+lid).value;
+      const body = {
+        name:line.name, type:line.type, qty:line.qty, unit_currency:currency,
         resale_target_eur:document.getElementById("ole-resale-"+lid).value||null,
-        resale_platform:document.getElementById("ole-platform-"+lid).value||null}});
+        resale_platform:document.getElementById("ole-platform-"+lid).value||null,
+      };
+      if(currency==="EUR"){ body.unit_price_eur = amount; body.unit_price_jpy = 0; }
+      else { body.unit_price_jpy = amount; body.unit_price_eur = null; }
+      await api(`/api/import-order-lines/${lid}`,{method:"PUT",json:body});
       await loadCardDeals(); return importOrderSheet(oid);
+    }
+    const sdeb = t.closest("[data-save-debit]");
+    if(sdeb){
+      await api(`/api/import-orders/${sdeb.dataset.saveDebit}/debit`,{method:"PUT",json:{
+        received_debit_eur:document.getElementById("io-debit").value||null}});
+      await loadCardDeals(); return importOrderSheet(sdeb.dataset.saveDebit);
     }
     const delln = t.closest("[data-del-line]");
     if(delln){
