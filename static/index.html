@@ -192,6 +192,20 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 .b-down{color:var(--loss);border-color:rgba(255,107,94,.35)}
 .b-flat{color:var(--muted);border-color:var(--line)}
 
+/* ---- stock ---- */
+.kanban{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px}
+.kanban-col{flex:1 0 220px;min-width:220px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r);padding:10px;min-height:80px}
+.kanban-col.drag-over{border-color:var(--accent);background:var(--panel2)}
+.kanban-col h3{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:2px 4px 10px;
+  display:flex;justify-content:space-between}
+.kanban-card{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px;
+  margin-bottom:8px;cursor:grab;font-size:12.5px}
+.kanban-card:active{cursor:grabbing}
+.stock-thumb{width:100%;height:64px;border-radius:7px;object-fit:cover;background:var(--ink);display:block;margin-bottom:6px}
+.stock-thumb-ph{width:100%;height:64px;border-radius:7px;background:var(--ink);display:flex;align-items:center;
+  justify-content:center;font-size:20px;color:var(--muted);margin-bottom:6px}
+.stock-days-warn{color:var(--loss)}
 @media (max-width:640px){ .f3{grid-template-columns:1fr 1fr} }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -211,6 +225,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
     <button data-mode="owned" aria-pressed="true"><span class="ico">◆</span><span>Portefeuille</span></button>
     <button data-mode="watch" aria-pressed="false"><span class="ico">◇</span><span>Veille <span id="watch-count"></span></span></button>
     <button data-mode="deals" aria-pressed="false"><span class="ico">⇄</span><span>Achat-revente</span></button>
+    <button data-mode="stock" aria-pressed="false"><span class="ico">📦</span><span>Stock</span></button>
     <button data-action="menu" aria-label="Menu"><span class="ico">⋯</span><span>Menu</span></button>
   </nav>
 
@@ -236,6 +251,10 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       </div>
     </section>
 
+    <section class="hero" id="stock-hero" style="display:none">
+      <div class="stats" id="stock-kpis"></div>
+    </section>
+
     <div class="filters" id="items-toolbar">
       <button class="btn primary" data-action="new-item">+ Nouvel item</button>
     </div>
@@ -258,7 +277,23 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       <input class="search" id="card-search" type="search" placeholder="Rechercher…" aria-label="Rechercher une fiche">
     </div>
 
+    <div class="filters" id="stock-toolbar" style="display:none">
+      <button class="btn primary" data-action="new-stock">+ Nouvelle carte</button>
+      <button class="btn primary" data-action="pick-a-card">🎯 Pick a card</button>
+    </div>
+    <div class="filters" id="stock-tabs" style="display:none">
+      <button class="chip" data-stock-filter="all" aria-pressed="true">Tout</button>
+      <button class="chip" data-stock-filter="achete" aria-pressed="false">Acheté</button>
+      <button class="chip" data-stock-filter="en_cours_import" aria-pressed="false">Import</button>
+      <button class="chip" data-stock-filter="en_stock" aria-pressed="false">Stock</button>
+      <button class="chip" data-stock-filter="en_vente" aria-pressed="false">Vente</button>
+      <button class="chip" data-stock-filter="vendu" aria-pressed="false">Vendu</button>
+      <button class="chip" data-stock-filter="sorties" aria-pressed="false">Sorties</button>
+      <input class="search" id="stock-search" type="search" placeholder="Rechercher…" aria-label="Rechercher une carte en stock">
+    </div>
+
     <div class="list" id="rows"></div>
+    <div id="stock-body" style="display:none"></div>
   </main>
 </div>
 
@@ -439,6 +474,7 @@ function renderCardDeals(){
 
 function renderRows(){
   if(mode==="deals") return renderCardDeals();
+  if(mode==="stock") return renderStock();
   const host = document.getElementById("rows");
   const pool = S.items.filter(i => (i.status||"owned")===mode);
   document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
@@ -682,7 +718,8 @@ function itemSheet(id){
       <button class="btn danger ghost" data-del-item="${i.id}">Supprimer</button>
       <button class="btn" data-edit-item="${i.id}">Modifier</button>
       ${watch ? `<button class="btn" data-buy="${i.id}">Je l'ai acheté</button>`
-              : `<button class="btn ghost" data-unbuy="${i.id}">Remettre en veille</button>`}
+              : `<button class="btn ghost" data-unbuy="${i.id}">Remettre en veille</button>
+                 <button class="btn ghost" data-transfer-to-stock="${i.id}">→ Stock (achat-revente)</button>`}
       <button class="btn primary" data-add-comp="${i.id}">Ajouter le relevé</button>
     </div>`);
 }
@@ -1160,6 +1197,271 @@ function cardSettingsForm(){
   `,"center");
 }
 
+/* ======================================================================= */
+/* Stock d'achat-revente                                                   */
+/* ======================================================================= */
+let stockData = null, stockFilter = "all", stockQuery = "", openStockId = null;
+const STOCK_LABELS = {achete:"Acheté", en_cours_import:"En import", en_stock:"En stock",
+  en_vente:"En vente", vendu:"Vendu", retourne:"Retourné", conserve:"Conservé"};
+const STOCK_FORWARD = ["achete", "en_cours_import", "en_stock", "en_vente", "vendu"];
+const STOCK_KANBAN = ["achete", "en_cours_import", "en_stock", "en_vente", "vendu"];
+
+async function loadStock(){ stockData = await api("/api/stock"); }
+function isDesktopLayout(){ return window.innerWidth >= 900; }
+function nextForwardStatus(status){
+  const i = STOCK_FORWARD.indexOf(status);
+  return (i >= 0 && i < STOCK_FORWARD.length - 1) ? STOCK_FORWARD[i + 1] : null;
+}
+
+function stockKpiCell(label, val, sub){
+  return `<div class="stat"><span class="eyebrow">${label}</span><div class="v">${val}</div>${sub?`<div class="s">${sub}</div>`:""}</div>`;
+}
+function renderStockKpis(){
+  const k = stockData.kpis;
+  const wn = (o, fmt) => o.value==null ? "—" : `${fmt(o.value)}${o.indicative?" · indicatif":""}`;
+  document.getElementById("stock-kpis").innerHTML = [
+    stockKpiCell("En stock", k.n_active),
+    stockKpiCell("Capital immobilisé", eur(k.capital_immobilise)),
+    stockKpiCell("Ventes 30j", `${k.sales_30d} · ${k.sales_per_day_30d}/j`),
+    stockKpiCell("CA réalisé", wn(k.revenue_realized, eur), `n=${k.revenue_realized.n}`),
+    stockKpiCell("Bénéf. net réalisé", wn(k.net_profit_realized, eur), `n=${k.net_profit_realized.n}`),
+    stockKpiCell("Délai vente médian", wn(k.median_sale_days, v=>v+" j"), `n=${k.median_sale_days.n}`),
+    stockKpiCell("Écart prix affiché/obtenu", wn(k.avg_price_gap_pct, pct), `n=${k.avg_price_gap_pct.n}`),
+  ].join("");
+}
+
+function stockThumb(r){
+  return r.photo_thumb_url ? `<img class="stock-thumb" src="${r.photo_thumb_url}" alt="">`
+    : `<div class="stock-thumb-ph">${TYPE_EMOJI[r.type]||"🃏"}</div>`;
+}
+function stockThumbSmall(r){
+  return r.photo_thumb_url ? `<img src="${r.photo_thumb_url}" alt="">` : (TYPE_EMOJI[r.type]||"🃏");
+}
+function stockMarginDisplay(r){
+  if(r.status==="vendu" && r.sale_net!=null) return eur(r.sale_net - r.cost_basis);
+  if(r.expected_margin_pct!=null) return pct(r.expected_margin_pct);
+  return "—";
+}
+
+function stockFilteredRows(){
+  let rows = stockData.stock;
+  if(stockFilter==="sorties") rows = rows.filter(r=>["retourne","conserve"].includes(r.status));
+  else if(stockFilter!=="all") rows = rows.filter(r=>r.status===stockFilter);
+  if(stockQuery) rows = rows.filter(r=>r.name.toLowerCase().includes(stockQuery));
+  return rows;
+}
+
+function kanbanCardHtml(r){
+  const days = r.days_in_status;
+  const warn = (r.status==="en_vente" && days>45) ? " stock-days-warn" : "";
+  return `<div class="kanban-card" draggable="true" data-stock-drag="${r.id}" data-open-stock="${r.id}">
+    ${stockThumb(r)}
+    <b style="font-size:12.5px">${esc(r.name)}</b>${r.grade?` <span class="dim">${esc(r.grade)}</span>`:""}
+    <div class="dim" style="font-size:11px;margin-top:2px">Coût ${eur(r.cost_basis)}${r.target_price?` · Visé ${eur(r.target_price)}`:""}</div>
+    <div class="${warn}" style="font-size:11px;margin-top:2px">${days!=null?days+" j dans ce statut":""}</div>
+  </div>`;
+}
+function renderKanban(){
+  return `<div class="kanban">${STOCK_KANBAN.map(st=>{
+    const items = stockData.stock.filter(r=>r.status===st);
+    return `<div class="kanban-col" data-kanban-status="${st}">
+      <h3>${STOCK_LABELS[st]}<span>${items.length}</span></h3>
+      ${items.map(kanbanCardHtml).join("") || `<p class="note" style="font-size:11px">—</p>`}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderStockListRows(rows){
+  if(!rows.length) return `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`;
+  return `<div class="list">${rows.map(r=>{
+    const days = r.days_in_status;
+    const next = nextForwardStatus(r.status);
+    return `<div class="card-item" style="cursor:default;flex-wrap:wrap" data-open-stock="${r.id}">
+      <div class="card-thumb">${stockThumbSmall(r)}</div>
+      <div class="card-body">
+        <div class="card-title-row"><span class="card-title">${esc(r.name)}${r.grade?` · ${esc(r.grade)}`:""}</span>
+          <span class="card-value">${eur(r.cost_basis)}</span></div>
+        <div class="card-sub-row">
+          <span>${STOCK_LABELS[r.status]}${days!=null?` · ${days} j${(r.status==="en_vente"&&days>45)?" ⚠":""}`:""}</span>
+          <span class="r">${stockMarginDisplay(r)}</span>
+        </div>
+      </div>
+      ${next ? `<button class="btn" data-advance-stock="${r.id}" data-next-status="${next}">Faire avancer</button>` : ""}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderStock(){
+  renderStockKpis();
+  const host = document.getElementById("stock-body");
+  if(!stockData.stock.length){
+    host.innerHTML = `<div class="empty"><b>Stock vide</b>
+      Enregistre ta première carte destinée à la revente.
+      <div style="margin-top:14px"><button class="btn primary" data-action="new-stock">+ Nouvelle carte</button></div></div>`;
+    return;
+  }
+  if(isDesktopLayout() && stockFilter==="all" && !stockQuery){
+    host.innerHTML = renderKanban();
+  } else {
+    host.innerHTML = renderStockListRows(stockFilteredRows());
+  }
+}
+
+function stockPhotoBlock(r){
+  if(!r) return "";
+  if(r.photo_url){
+    return `<div style="position:relative;flex-shrink:0">
+      <img src="${r.photo_thumb_url}" alt="" data-open-lightbox="${r.photo_url}"
+        style="width:76px;height:106px;object-fit:cover;border-radius:10px;border:1px solid var(--line);cursor:pointer;display:block">
+      <button class="x" data-replace-stock-photo="${r.id}" title="Remplacer la photo"
+        style="position:absolute;bottom:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✎</button>
+      <button class="x" data-del-stock-photo="${r.id}" title="Supprimer la photo"
+        style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✕</button>
+      <input id="stock-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-stock="${r.id}" hidden>
+    </div>`;
+  }
+  return `<label style="width:76px;height:106px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+      border:1px dashed var(--line);border-radius:10px;cursor:pointer;color:var(--muted);font-size:22px;margin:0" title="Ajouter une photo">
+    +
+    <input id="stock-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-stock="${r.id}" hidden>
+  </label>`;
+}
+
+function stockEventsBlock(r){
+  const events = [...(r.events||[])].sort((a,b)=> a.at<b.at?-1:1);
+  // Le tout premier événement ('achete') n'a qu'une date (pas d'heure) : on
+  // complète à minuit pour rester une valeur datetime-local valide, sinon
+  // le navigateur refuse de l'afficher (input vide, avertissement console).
+  const dtLocal = at => { const s = at||""; return s.includes("T") ? s.slice(0,16) : (s ? s+"T00:00" : ""); };
+  const rows = events.map(e=>`
+    <div class="comp" style="grid-template-columns:1fr auto auto">
+      <span>${STOCK_LABELS[e.to_status]||e.to_status}</span>
+      <input type="datetime-local" value="${dtLocal(e.at)}" data-event-date="${e.id}" style="width:auto;min-height:36px;padding:6px">
+      <button class="btn" data-save-event-date="${e.id}" style="min-height:36px;padding:6px 10px">✓</button>
+    </div>`).join("") || `<p class="note">Aucun événement.</p>`;
+  const d = r.delays || {};
+  return `<hr class="sep"><span class="eyebrow">Historique (dates corrigibles)</span>
+    <div style="margin:8px 0 10px">${rows}</div>
+    <div class="stats">
+      ${stockKpiCell("Délai import", d.import_days!=null?d.import_days+" j":"—")}
+      ${stockKpiCell("Délai mise en vente", d.listing_days!=null?d.listing_days+" j":"—")}
+      ${stockKpiCell("Délai de vente", d.sale_days!=null?d.sale_days+" j":"—")}
+    </div>`;
+}
+
+function stockSheet(id){
+  const r = id ? stockData.stock.find(x=>x.id===id) : null;
+  openStockId = id;
+  const next = r ? nextForwardStatus(r.status) : null;
+  openSheet(`
+    <div class="sheet-head">
+      <div style="display:flex;gap:12px;flex:1;min-width:0">
+        ${stockPhotoBlock(r)}
+        <div style="min-width:0"><span class="eyebrow">${r?STOCK_LABELS[r.status]:"Nouvelle"}</span>
+          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r?esc(r.name):"Carte en stock"}</h2></div>
+      </div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+
+    <div class="f2">
+      <label><span class="lb">Nom</span><input id="st-name" value="${esc(r?.name||"")}" placeholder="Dracaufeu ex"></label>
+      <label><span class="lb">Set</span><input id="st-set" value="${esc(r?.set_name||"")}"></label>
+    </div>
+    <div class="f3">
+      <label><span class="lb">Numéro</span><input id="st-number" value="${esc(r?.card_number||"")}"></label>
+      <label><span class="lb">Langue</span><input id="st-lang" value="${esc(r?.lang||"FR")}"></label>
+      <label><span class="lb">Type</span><select id="st-type">
+        <option value="loose" ${r?.type==="loose"?"selected":""}>Loose</option>
+        <option value="gradee" ${r?.type==="gradee"?"selected":""}>Gradée</option>
+      </select></label>
+    </div>
+    <label><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
+    <div class="f3">
+      <label><span class="lb">Coût de revient</span><input id="st-cost" type="number" min="0" step="0.01" value="${r?.cost_basis??""}"></label>
+      <label><span class="lb">Date d'achat</span><input id="st-buydate" type="date" value="${r?.buy_date||today()}"></label>
+      <label><span class="lb">Plateforme d'achat</span><input id="st-buyplatform" value="${esc(r?.buy_platform||"")}"></label>
+    </div>
+    <label><span class="lb">Lien d'achat</span><input id="st-buyurl" value="${esc(r?.buy_url||"")}" placeholder="https://…"></label>
+    <div class="f2">
+      <label><span class="lb">Prix de vente visé</span><input id="st-target" type="number" min="0" step="0.01" value="${r?.target_price??""}"></label>
+      <label><span class="lb">Plateforme de vente visée</span><select id="st-targetplatform">
+        <option value="">—</option>
+        ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${r?.target_platform===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <label><span class="lb">Notes</span><textarea id="st-notes" rows="2">${esc(r?.notes||"")}</textarea></label>
+    ${!r ? `<label style="display:flex;align-items:center;gap:8px"><span class="lb" style="margin:0">Dupliquer ×</span>
+      <input id="st-dup" type="number" min="1" step="1" value="1" style="width:70px"></label>` : ""}
+
+    ${r ? stockEventsBlock(r) : ""}
+    ${r && r.status==="vendu" ? `<hr class="sep"><span class="eyebrow">Vente</span>
+      <div class="f3" style="margin-top:8px">
+        <label><span class="lb">Prix de vente</span><input id="st-sale-price" type="number" min="0" step="0.01" value="${r.sale_price??""}"></label>
+        <label><span class="lb">Plateforme</span><select id="st-sale-platform">
+          ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${r.sale_platform===k?"selected":""}>${l}</option>`).join("")}
+        </select></label>
+        <label><span class="lb">Net encaissé${r.sale_net_manual?" (corrigé à la main)":""}</span>
+          <input id="st-sale-net" type="number" min="0" step="0.01" value="${r.sale_net??""}"></label>
+      </div>
+      <div class="actions" style="justify-content:flex-start"><button class="btn" data-save-sale="${r.id}">Corriger la vente</button></div>` : ""}
+
+    <div class="actions">
+      ${r?`<button class="btn danger ghost" data-del-stock="${r.id}">Supprimer</button>`:""}
+      ${r && r.status!=="conserve" && r.status!=="retourne" ? `
+        <button class="btn ghost" data-stock-status="${r.id}" data-to-status="retourne">Retourné</button>
+        <button class="btn ghost" data-stock-status="${r.id}" data-to-status="conserve">Garder (portefeuille)</button>` : ""}
+      ${next ? `<button class="btn" data-advance-stock="${r?.id}" data-next-status="${next}">Faire avancer</button>` : ""}
+      <button class="btn primary" data-save-stock="${r?.id||""}">Enregistrer</button>
+    </div>
+  `,"center");
+}
+
+function saleForm(sid){
+  const r = stockData.stock.find(x=>x.id===sid); if(!r) return;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Vente</span><h2>${esc(r.name)}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note" style="margin-bottom:14px">Prix et plateforme suffisent : les frais et le net sont calculés automatiquement.</p>
+    <div class="f2">
+      <label><span class="lb">Prix de vente</span><input id="sf-price" type="number" min="0" step="0.01" value="${r.target_price??""}"></label>
+      <label><span class="lb">Plateforme</span><select id="sf-platform">
+        ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${r.target_platform===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-confirm-sale="${sid}">Marquer vendu</button></div>
+  `,"center");
+}
+
+function pickACardSheet(res, budget){
+  const modeNote = res.theoretical_mode
+    ? `<div class="warn">Moins de 15 ventes en base (${res.n_total_sold}) : classement sur la marge théorique (ROI net), pas sur le rendement annualisé — trop peu de données pour estimer un délai de vente fiable.</div>`
+    : `<p class="note">Classement par rendement annualisé, fondé sur ${res.n_total_sold} ventes en base.</p>`;
+  const list = res.top.length ? res.top.map((c,i)=>`
+    <div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default">
+      <div style="display:flex;justify-content:space-between;gap:10px">
+        <b>${i+1}. ${esc(c.name)}</b>
+        <span class="num gain" style="font-weight:700">${res.theoretical_mode ? pct(c.roi_net_pct) : pct(c.rendement_pct)+"/an"}</span>
+      </div>
+      <div class="dim" style="font-size:12px;margin:4px 0">${c.kind==="sheet"?"🃏 Fiche carte":"◇ Veille"} · confiance ${c.confidence}</div>
+      <p class="note" style="margin:0">${esc(c.reason)}</p>
+    </div>`).join("") : `<div class="empty"><b>Rien à proposer</b>Crée des fiches carte ou suis des items en veille pour que Pick a Card ait matière à comparer.</div>`;
+  const budgetBlock = res.budget ? `
+    <hr class="sep"><span class="eyebrow">Combinaison pour ${eur(res.budget.amount)}</span>
+    <p class="note">${res.budget.picks.length} carte(s), ${eur(res.budget.total_cost)} engagés, ${eur(res.budget.remaining)} restants.</p>
+    <div style="margin:8px 0">${res.budget.picks.map(c=>`<div class="comp" style="grid-template-columns:1fr auto"><span>${esc(c.name)}</span><span class="p">${eur(c.cost_basis)}</span></div>`).join("")}</div>` : "";
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Pick a card</span><h2>Meilleures cartes à acheter</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    ${modeNote}
+    <div class="f2">
+      <label><span class="lb">Budget (€, facultatif)</span><input id="pac-budget" type="number" min="0" step="1" value="${budget??""}"></label>
+      <div style="display:flex;align-items:flex-end;padding-bottom:12px"><button class="btn" data-pick-a-card style="width:100%">Recalculer</button></div>
+    </div>
+    <div style="margin:10px 0">${list}</div>
+    ${budgetBlock}
+  `,"center");
+}
+
 function menuSheet(){
   openSheet(`
     <div class="sheet-head"><div><span class="eyebrow">Menu</span><h2>Actions</h2></div>
@@ -1168,6 +1470,8 @@ function menuSheet(){
       <button class="menu-item" data-action="new-item">+ Nouvel item</button>
       <button class="menu-item" data-action="new-card-sheet">+ Fiche carte</button>
       <button class="menu-item" data-action="new-import-order">+ Import Japon</button>
+      <button class="menu-item" data-action="new-stock">+ Carte en stock</button>
+      <button class="menu-item" data-action="pick-a-card">🎯 Pick a card</button>
       <button class="menu-item" data-action="snapshot">Enregistrer un point (courbe)</button>
       <button class="menu-item" data-action="settings">Réglages de l'estimation</button>
       <button class="menu-item" data-action="card-settings">Réglages achat-revente</button>
@@ -1523,6 +1827,110 @@ document.addEventListener("click", async ev=>{
       await loadCardDeals(); closeSheet(); return renderRows();
     }
 
+    // --- Stock d'achat-revente ---
+    if(act==="new-stock") return stockSheet(null);
+    if(act==="pick-a-card"){
+      const res = await api("/api/stock/pick-a-card");
+      return pickACardSheet(res, null);
+    }
+    const pac = t.closest("[data-pick-a-card]");
+    if(pac){
+      const budget = document.getElementById("pac-budget").value;
+      const res = await api("/api/stock/pick-a-card" + (budget ? `?budget=${encodeURIComponent(budget)}` : ""));
+      return pickACardSheet(res, budget || null);
+    }
+
+    const svst = t.closest("[data-save-stock]");
+    if(svst){
+      const g = x => document.getElementById(x).value.trim();
+      const body = {
+        name:g("st-name"), set_name:g("st-set"), card_number:g("st-number"), lang:g("st-lang"),
+        type:g("st-type"), grade:g("st-grade"), cost_basis:g("st-cost")||0, buy_date:g("st-buydate"),
+        buy_platform:g("st-buyplatform"), buy_url:g("st-buyurl"), target_price:g("st-target")||null,
+        target_platform:g("st-targetplatform")||null, notes:g("st-notes"),
+      };
+      if(!body.name) return document.getElementById("st-name").focus();
+      const id = svst.dataset.saveStock;
+      if(id){
+        await api("/api/stock/"+id, {json:body, method:"PUT"});
+        await loadStock(); return stockSheet(id);
+      }
+      const dupEl = document.getElementById("st-dup");
+      const n = dupEl ? Math.max(1, parseInt(dupEl.value)||1) : 1;
+      let firstId = null;
+      for(let i=0;i<n;i++){
+        const r = await api("/api/stock", {json:body, method:"POST"});
+        if(!firstId) firstId = r.id;
+      }
+      await loadStock(); closeSheet(); return renderRows();
+    }
+    const dsk = t.closest("[data-del-stock]");
+    if(dsk){
+      if(!confirm("Supprimer cette ligne de stock ?")) return;
+      await api("/api/stock/"+dsk.dataset.delStock, {method:"DELETE"});
+      await loadStock(); closeSheet(); return renderRows();
+    }
+    const advk = t.closest("[data-advance-stock]");
+    if(advk){
+      const sid = advk.dataset.advanceStock, nextSt = advk.dataset.nextStatus;
+      if(nextSt==="vendu") return saleForm(sid);
+      await api(`/api/stock/${sid}/status`, {method:"POST", json:{to_status:nextSt}});
+      await loadStock();
+      // Rouvre la fiche si c'est elle qui a déclenché l'action, sinon la liste
+      // resterait périmée : un second clic renverrait le même statut avant mise à jour.
+      return openStockId===sid ? stockSheet(sid) : renderRows();
+    }
+    const osk = t.closest("[data-open-stock]"); if(osk) return stockSheet(osk.dataset.openStock);
+    const stst = t.closest("[data-stock-status]");
+    if(stst){
+      const sid = stst.dataset.stockStatus, toSt = stst.dataset.toStatus;
+      const msg = toSt==="conserve" ? "Transférer au portefeuille ? La ligne de stock sort définitivement du pipeline."
+        : "Marquer retourné ?";
+      if(!confirm(msg)) return;
+      await api(`/api/stock/${sid}/status`, {method:"POST", json:{to_status:toSt}});
+      await loadStock(); closeSheet(); return renderRows();
+    }
+    const cs2 = t.closest("[data-confirm-sale]");
+    if(cs2){
+      const sid = cs2.dataset.confirmSale;
+      const price = document.getElementById("sf-price").value;
+      if(!(parseFloat(price)>0)) return document.getElementById("sf-price").focus();
+      await api(`/api/stock/${sid}/status`, {method:"POST", json:{
+        to_status:"vendu", sale_price:price, sale_platform:document.getElementById("sf-platform").value}});
+      await loadStock(); return stockSheet(sid);
+    }
+    const svs = t.closest("[data-save-sale]");
+    if(svs){
+      const sid = svs.dataset.saveSale;
+      await api(`/api/stock/${sid}/sale`, {method:"PUT", json:{
+        sale_price:document.getElementById("st-sale-price").value,
+        sale_platform:document.getElementById("st-sale-platform").value,
+        sale_net:document.getElementById("st-sale-net").value}});
+      await loadStock(); return stockSheet(sid);
+    }
+    const sed = t.closest("[data-save-event-date]");
+    if(sed){
+      const eid = sed.dataset.saveEventDate;
+      const input = document.querySelector(`[data-event-date="${eid}"]`);
+      await api(`/api/stock-events/${eid}`, {method:"PUT", json:{at:input.value}});
+      const sid = openStockId;
+      await loadStock(); return stockSheet(sid);
+    }
+    const rstp = t.closest("[data-replace-stock-photo]");
+    if(rstp){ document.getElementById("stock-photo-file")?.click(); return; }
+    const dstp = t.closest("[data-del-stock-photo]");
+    if(dstp){
+      if(!confirm("Supprimer cette photo ?")) return;
+      await api(`/api/stock/${dstp.dataset.delStockPhoto}/photo`, {method:"DELETE"});
+      await loadStock(); return stockSheet(dstp.dataset.delStockPhoto);
+    }
+    const t2s = t.closest("[data-transfer-to-stock]");
+    if(t2s){
+      if(!confirm("Transférer cet item vers le stock (achat-revente) ?")) return;
+      await api(`/api/items/${t2s.dataset.transferToStock}/transfer-to-stock`, {method:"POST"});
+      closeSheet(); return refresh();
+    }
+
     // --- saisie rapide ---
     if(t.id==="fab" || t.closest("#fab")) return quickAddPicker();
     const qi = t.closest("[data-quick-item]"); if(qi) return quickAddForm(qi.dataset.quickItem);
@@ -1540,12 +1948,25 @@ document.addEventListener("click", async ev=>{
     if(mchip){
       mode = mchip.dataset.mode;
       document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c===mchip));
-      document.getElementById("items-toolbar").style.display = mode==="deals" ? "none" : "flex";
-      document.getElementById("filters-items").style.display = mode==="deals" ? "none" : "flex";
+      document.getElementById("items-toolbar").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
+      document.getElementById("filters-items").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
       document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
       document.getElementById("card-filters").style.display = mode==="deals" ? "flex" : "none";
+      document.getElementById("stock-toolbar").style.display = mode==="stock" ? "flex" : "none";
+      document.getElementById("stock-tabs").style.display = mode==="stock" ? "flex" : "none";
+      document.getElementById("stock-hero").style.display = mode==="stock" ? "block" : "none";
+      document.querySelector("section.hero:not(#stock-hero)").style.display = mode==="stock" ? "none" : "block";
+      document.getElementById("rows").style.display = mode==="stock" ? "none" : "flex";
+      document.getElementById("stock-body").style.display = mode==="stock" ? "block" : "none";
       if(mode==="deals" && !cardDeals) await loadCardDeals();
+      if(mode==="stock" && !stockData) await loadStock();
       return renderRows();
+    }
+    const sfChip = t.closest("[data-stock-filter]");
+    if(sfChip){
+      stockFilter = sfChip.dataset.stockFilter;
+      document.querySelectorAll("[data-stock-filter]").forEach(c=>c.setAttribute("aria-pressed", c===sfChip));
+      renderStock();
     }
     const chip = t.closest("[data-filter]");
     if(chip){
@@ -1577,6 +1998,12 @@ document.addEventListener("keydown", e=>{
 });
 document.getElementById("search").addEventListener("input", e=>{ query = e.target.value.toLowerCase().trim(); if(S) renderRows(); });
 document.getElementById("card-search").addEventListener("input", e=>{ cardQuery = e.target.value.toLowerCase().trim(); if(cardDeals) renderRows(); });
+document.getElementById("stock-search").addEventListener("input", e=>{ stockQuery = e.target.value.toLowerCase().trim(); if(stockData) renderStock(); });
+let __stockResizeTimer;
+window.addEventListener("resize", ()=>{
+  clearTimeout(__stockResizeTimer);
+  __stockResizeTimer = setTimeout(()=>{ if(mode==="stock" && stockData) renderStock(); }, 200);
+});
 document.getElementById("file").addEventListener("change", async e=>{
   const f = e.target.files[0]; if(!f) return;
   const fd = new FormData(); fd.append("file", f);
@@ -1599,6 +2026,50 @@ document.addEventListener("change", async e=>{
     await api(`/api/card-sheets/${sid}/photo`,{method:"POST", body:fd});
     await loadCardDeals(); return cardSheetSheet(sid);
   }catch(err){ alert("Upload impossible : "+err.message); }
+});
+// Upload de la photo d'une ligne de stock (une seule, ajout ou remplacement).
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="stock-photo-file") return;
+  const sid = e.target.dataset.stock;
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if(!f || !sid) return;
+  if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); return; }
+  try{
+    const fd = new FormData(); fd.append("file", f);
+    await api(`/api/stock/${sid}/photo`,{method:"POST", body:fd});
+    await loadStock(); return stockSheet(sid);
+  }catch(err){ alert("Upload impossible : "+err.message); }
+});
+// Kanban : glisser-déposer une carte d'une colonne à l'autre.
+document.addEventListener("dragstart", e=>{
+  const card = e.target.closest("[data-stock-drag]");
+  if(card) e.dataTransfer.setData("text/plain", card.dataset.stockDrag);
+});
+document.addEventListener("dragover", e=>{
+  if(e.target.closest(".kanban-col")) e.preventDefault();
+});
+document.addEventListener("dragenter", e=>{
+  const col = e.target.closest(".kanban-col");
+  if(col) col.classList.add("drag-over");
+});
+document.addEventListener("dragleave", e=>{
+  const col = e.target.closest(".kanban-col");
+  if(col && !col.contains(e.relatedTarget)) col.classList.remove("drag-over");
+});
+document.addEventListener("drop", async e=>{
+  const col = e.target.closest(".kanban-col");
+  if(!col) return;
+  e.preventDefault();
+  col.classList.remove("drag-over");
+  const sid = e.dataTransfer.getData("text/plain");
+  const toStatus = col.dataset.kanbanStatus;
+  if(!sid || !toStatus) return;
+  if(toStatus === "vendu"){ await loadStock(); return saleForm(sid); }
+  try{
+    await api(`/api/stock/${sid}/status`, {method:"POST", json:{to_status:toStatus}});
+    await loadStock(); renderRows();
+  }catch(err){ alert("Échec : "+err.message); }
 });
 // Upload de photos depuis la fiche item (le <input id="photo-file"> vit dans la sheet).
 // Delegation via document pour capturer les changes des inputs re-rendus.

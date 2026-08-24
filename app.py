@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 import media as media_mod
 import deals as deals_mod
 import card_deals as card_deals_mod
+import stock as stock_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -41,6 +42,7 @@ COOKIE = "pkmn_session"
 MEDIA = media_mod.media_dir(DB)  # <dossier DB>/media, jamais /data en dur
 DEAL_MEDIA = MEDIA / "_deals"     # sous-namespace dédié pour ne pas collisionner avec les item_id
 CARD_SHEET_MEDIA = MEDIA / "_card_sheets"  # une seule photo par fiche, même pipeline que items/deals
+STOCK_MEDIA = MEDIA / "_stock"             # idem pour les lignes de stock
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -56,10 +58,13 @@ SOURCES = {
     "vinted_listing": ("Vinted — annonce", 0.35),
     "index": ("Pokéindex / indice", 0.40),
     "manual": ("Estimation perso", 0.50),
+    # Une vente réelle de TA carte est le meilleur comparable qui existe :
+    # poids au niveau du maximum actuel (eBay vendu), jamais en dessous.
+    "own_sale": ("Vente perso", 1.00),
 }
 # Sources qui prouvent une transaction réelle → alimentent le volume de ventes.
 # vinted_sold en fait partie ; vinted_listing NON (annonce n'est pas une vente).
-SALE_SOURCES = {"ebay", "cm_sold", "gcc", "vinted_sold"}
+SALE_SOURCES = {"ebay", "cm_sold", "gcc", "vinted_sold", "own_sale"}
 DEFAULT_SETTINGS = {
     "halfLife": 60,
     "fees": 12.0,
@@ -233,6 +238,37 @@ def init() -> None:
                 sort_order INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS iol_order ON import_order_lines(order_id, sort_order);
+
+            -- Stock d'achat-revente : une ligne = un exemplaire, jamais une
+            -- quantité (indispensable pour suivre les dates carte par carte).
+            -- Indépendant du Portefeuille : ne pèse jamais dans build_state().
+            CREATE TABLE IF NOT EXISTS stock_items(
+                id TEXT PRIMARY KEY,
+                linked_item_id TEXT REFERENCES items(id) ON DELETE SET NULL,
+                name TEXT NOT NULL DEFAULT '', set_name TEXT DEFAULT '', card_number TEXT DEFAULT '',
+                lang TEXT DEFAULT 'FR', type TEXT NOT NULL DEFAULT 'loose', grade TEXT DEFAULT '',
+                cost_basis REAL NOT NULL DEFAULT 0,
+                buy_date TEXT, buy_platform TEXT DEFAULT '', buy_url TEXT DEFAULT '',
+                target_price REAL, target_platform TEXT,
+                photo_id TEXT, photo_size_bytes INTEGER, photo_width INTEGER, photo_height INTEGER,
+                status TEXT NOT NULL DEFAULT 'achete',
+                sale_price REAL, sale_platform TEXT,
+                sale_net REAL, sale_net_manual INTEGER NOT NULL DEFAULT 0,
+                source_order_line_id TEXT REFERENCES import_order_lines(id) ON DELETE SET NULL,
+                notes TEXT DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS stock_status ON stock_items(status);
+            -- Historique des changements de statut : jamais écrasé, seulement
+            -- ajouté (les dates peuvent être corrigées après coup en éditant
+            -- une ligne existante). C'est de là que les 3 délais sont recalculés
+            -- à chaque lecture, jamais mis en cache sur stock_items.
+            CREATE TABLE IF NOT EXISTS stock_events(
+                id TEXT PRIMARY KEY,
+                stock_id TEXT NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+                from_status TEXT, to_status TEXT NOT NULL,
+                at TEXT NOT NULL, note TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS stock_events_stock ON stock_events(stock_id, at);
             """
         )
         migrate(con)
@@ -1801,6 +1837,408 @@ def api_realize_order_line(lid: str, p: dict = Body(...)):
     return {"ok": True, "item_id": iid, "buy_price": unit_cost}
 
 
+# --------------------------------------------------------------------- stock
+
+STOCK_FIELDS = ["linked_item_id", "name", "set_name", "card_number", "lang", "type", "grade",
+                "cost_basis", "buy_date", "buy_platform", "buy_url",
+                "target_price", "target_platform", "notes", "source_order_line_id"]
+
+
+def clean_stock_item(p: dict) -> dict:
+    def numopt(k):
+        v = p.get(k)
+        return float(v) if v not in (None, "") else None
+    return {
+        "linked_item_id": (str(p["linked_item_id"]) if p.get("linked_item_id") else None),
+        "name": str(p.get("name", "")).strip()[:200],
+        "set_name": str(p.get("set_name", ""))[:120],
+        "card_number": str(p.get("card_number", ""))[:40],
+        "lang": str(p.get("lang", "FR"))[:10],
+        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "grade": str(p.get("grade", ""))[:40],
+        "cost_basis": max(0.0, float(p.get("cost_basis") or 0)),
+        "buy_date": str(p.get("buy_date") or date.today().isoformat())[:10],
+        "buy_platform": str(p.get("buy_platform", ""))[:80],
+        "buy_url": str(p.get("buy_url", ""))[:500],
+        "target_price": numopt("target_price"),
+        "target_platform": p.get("target_platform") if p.get("target_platform") in card_deals_mod.SELL_PLATFORMS else None,
+        "notes": str(p.get("notes", ""))[:2000],
+        "source_order_line_id": (str(p["source_order_line_id"]) if p.get("source_order_line_id") else None),
+    }
+
+
+def _stock_photo_urls(row: dict) -> dict:
+    if row.get("photo_id"):
+        return {"photo_url": f"/api/stock/{row['id']}/photo", "photo_thumb_url": f"/api/stock/{row['id']}/photo/thumb"}
+    return {"photo_url": None, "photo_thumb_url": None}
+
+
+def _stock_view(row: dict, events: list[dict]) -> dict:
+    d = dict(row)
+    delays = stock_mod.compute_delays(events)
+    d["delays"] = {"import_days": delays["import_days"], "listing_days": delays["listing_days"],
+                    "sale_days": delays["sale_days"]}
+    d["days_in_status"] = stock_mod.days_in_current_status(d["status"], events)
+    d["events"] = events
+    d.update(_stock_photo_urls(d))
+    cb = d.get("cost_basis")
+    d["expected_margin_pct"] = (round((d["target_price"] - cb) / cb * 100, 1)
+                                 if d.get("target_price") and cb else None)
+    return d
+
+
+@app.get("/api/stock")
+def api_list_stock():
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM stock_items ORDER BY created_at DESC")]
+        all_events = [dict(r) for r in con.execute("SELECT * FROM stock_events ORDER BY at")]
+    events_by_stock: dict[str, list] = {}
+    for e in all_events:
+        events_by_stock.setdefault(e["stock_id"], []).append(e)
+    views = [_stock_view(r, events_by_stock.get(r["id"], [])) for r in rows]
+    kpis = stock_mod.build_kpis(rows, events_by_stock)
+    return {"stock": views, "kpis": kpis}
+
+
+@app.post("/api/stock")
+def api_add_stock(p: dict = Body(...)):
+    d = clean_stock_item(p)
+    if not d["name"]:
+        raise HTTPException(400, "nom manquant")
+    now = datetime.now().isoformat(timespec="seconds")
+    iid = d["linked_item_id"]
+    sid = nid()
+    with db() as con:
+        if not iid:
+            # Toujours un item lié : même sans lien explicite, il en faut un
+            # pour que le relevé "vente perso" ait un endroit où exister.
+            # En veille : ne pèse jamais dans le portefeuille.
+            iid = nid()
+            con.execute(
+                "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, d["name"], d["type"], d["lang"] or "FR", d["grade"], d["set_name"],
+                 1, 0.0, d["buy_date"], "", "watch", 0.0, now),
+            )
+            d["linked_item_id"] = iid
+        con.execute(
+            f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
+            f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
+            (sid, *[d[f] for f in STOCK_FIELDS], "achete", now),
+        )
+        con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                    (nid(), sid, None, "achete", d["buy_date"]))
+    return {"id": sid, "linked_item_id": iid}
+
+
+@app.put("/api/stock/{sid}")
+def api_edit_stock(sid: str, p: dict = Body(...)):
+    d = clean_stock_item(p)
+    if not d["name"]:
+        raise HTTPException(400, "nom manquant")
+    with db() as con:
+        cur = con.execute(
+            f"UPDATE stock_items SET {','.join(f + '=?' for f in STOCK_FIELDS)} WHERE id=?",
+            (*[d[f] for f in STOCK_FIELDS], sid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "ligne introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/stock/{sid}")
+def api_del_stock(sid: str):
+    with db() as con:
+        con.execute("DELETE FROM stock_events WHERE stock_id=?", (sid,))
+        con.execute("DELETE FROM stock_items WHERE id=?", (sid,))
+    media_mod.delete_item_dir(STOCK_MEDIA, sid)
+    return {"ok": True}
+
+
+def _add_own_sale_comp(iid: str | None, price: float, at: str) -> None:
+    if not iid:
+        return
+    with db() as con:
+        if not con.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone():
+            return
+        con.execute(
+            "INSERT INTO comps(id,item_id,price,date,source,note,excluded,sold_count,shipping) VALUES(?,?,?,?,?,?,?,?,?)",
+            (nid(), iid, price, str(at)[:10], "own_sale", "", 0, 1, 0.0),
+        )
+
+
+def _transfer_stock_to_portfolio(stock_row: dict) -> str:
+    """Toujours un NOUVEL item portefeuille (jamais de réécriture de
+    linked_item_id) : plusieurs lignes de stock peuvent partager le même item
+    lié pour les relevés de prix (même carte), sans se marcher dessus ici."""
+    now = datetime.now().isoformat(timespec="seconds")
+    iid = nid()
+    with db() as con:
+        con.execute(
+            "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (iid, stock_row["name"], stock_row["type"], stock_row["lang"] or "FR", stock_row["grade"],
+             stock_row["set_name"], 1, stock_row["cost_basis"], stock_row["buy_date"] or date.today().isoformat(),
+             stock_row["notes"], "owned", 0.0, now),
+        )
+    return iid
+
+
+@app.post("/api/stock/{sid}/status")
+def api_stock_status(sid: str, p: dict = Body(...)):
+    to_status = p.get("to_status")
+    if to_status not in stock_mod.STATUSES:
+        raise HTTPException(400, "statut invalide")
+    at = p.get("at") or datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        row = con.execute("SELECT * FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        d = dict(row)
+        cur_status = d["status"]
+        updates: dict = {"status": to_status}
+        if to_status == "vendu":
+            if p.get("sale_price") in (None, "") or not p.get("sale_platform"):
+                raise HTTPException(400, "prix de vente et plateforme requis")
+            sale_price = float(p["sale_price"])
+            sale_platform = p["sale_platform"]
+            manual_net = p.get("sale_net") not in (None, "")
+            if manual_net:
+                sale_net = float(p["sale_net"])
+            else:
+                cs = get_card_settings()
+                sale_net = stock_mod.compute_sale_net(sale_price, sale_platform, cs)["net"]
+            updates.update({"sale_price": sale_price, "sale_platform": sale_platform,
+                             "sale_net": sale_net, "sale_net_manual": int(manual_net)})
+        con.execute(f"UPDATE stock_items SET {','.join(k + '=?' for k in updates)} WHERE id=?",
+                    (*updates.values(), sid))
+        con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                    (nid(), sid, cur_status, to_status, at))
+    if to_status == "vendu":
+        _add_own_sale_comp(d["linked_item_id"], updates["sale_price"], at)
+    new_item_id = None
+    if to_status == "conserve":
+        new_item_id = _transfer_stock_to_portfolio(d)
+    return {"ok": True, "item_id": new_item_id}
+
+
+@app.put("/api/stock/{sid}/sale")
+def api_correct_stock_sale(sid: str, p: dict = Body(...)):
+    """Corrige les montants d'une vente déjà enregistrée, sans rejouer le
+    changement de statut (donc sans dupliquer l'événement ni le relevé)."""
+    with db() as con:
+        row = con.execute("SELECT * FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        d = dict(row)
+        if d["status"] != "vendu":
+            raise HTTPException(400, "cette ligne n'est pas vendue")
+        sale_price = float(p["sale_price"]) if p.get("sale_price") not in (None, "") else d["sale_price"]
+        sale_platform = p.get("sale_platform") or d["sale_platform"]
+        manual_net = p.get("sale_net") not in (None, "")
+        if manual_net:
+            sale_net = float(p["sale_net"])
+        else:
+            cs = get_card_settings()
+            sale_net = stock_mod.compute_sale_net(sale_price, sale_platform, cs)["net"]
+        con.execute(
+            "UPDATE stock_items SET sale_price=?, sale_platform=?, sale_net=?, sale_net_manual=? WHERE id=?",
+            (sale_price, sale_platform, sale_net, int(manual_net), sid),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/stock/{sid}/events")
+def api_get_stock_events(sid: str):
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM stock_events WHERE stock_id=? ORDER BY at", (sid,))]
+    return {"events": rows}
+
+
+@app.put("/api/stock-events/{eid}")
+def api_edit_stock_event(eid: str, p: dict = Body(...)):
+    """Correction d'une date après coup — les 3 délais sont recalculés à la
+    prochaine lecture, rien d'autre à faire côté serveur."""
+    at = p.get("at")
+    if not at:
+        raise HTTPException(400, "date manquante")
+    with db() as con:
+        cur = con.execute("UPDATE stock_events SET at=? WHERE id=?", (at, eid))
+        if not cur.rowcount:
+            raise HTTPException(404, "événement introuvable")
+    return {"ok": True}
+
+
+@app.post("/api/items/{iid}/transfer-to-stock")
+def api_transfer_item_to_stock(iid: str):
+    """Portefeuille -> Stock (l'inverse de 'conservé'). qty>1 : décrémente
+    d'une unité (le reste continue de compter normalement). qty=1 : l'item
+    passe en veille (ne compte plus, mais l'historique de relevés survit —
+    jamais de suppression, ce serait perdre la donnée marché)."""
+    with db() as con:
+        row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "item introuvable")
+        it = dict(row)
+        if con.execute("SELECT 1 FROM purchases WHERE item_id=?", (iid,)).fetchone():
+            raise HTTPException(400, "item avec prix d'achat détaillés : ajuste les lots manuellement avant transfert")
+        if it["qty"] > 1:
+            con.execute("UPDATE items SET qty=? WHERE id=?", (it["qty"] - 1, iid))
+        else:
+            con.execute("UPDATE items SET status='watch' WHERE id=?", (iid,))
+    d = {
+        "linked_item_id": iid, "name": it["name"], "set_name": it["set_name"], "card_number": "",
+        "lang": it["lang"], "type": it["type"] if it["type"] in ("loose", "gradee") else "loose",
+        "grade": it["grade"], "cost_basis": it["buy_price"],
+        "buy_date": it["buy_date"] or date.today().isoformat(),
+        "buy_platform": "", "buy_url": "", "target_price": None, "target_platform": None,
+        "notes": "", "source_order_line_id": None,
+    }
+    sid = nid()
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        con.execute(
+            f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
+            f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
+            (sid, *[d[f] for f in STOCK_FIELDS], "en_stock", now),
+        )
+        con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                    (nid(), sid, None, "en_stock", now))
+    return {"id": sid}
+
+
+# --- photo de ligne de stock (une seule, facultative — même pipeline que items/fiches) ---
+
+@app.post("/api/stock/{sid}/photo")
+async def api_add_stock_photo(sid: str, file: UploadFile = File(...)):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        old_photo_id = row["photo_id"]
+    raw = await file.read()
+    try:
+        info = media_mod.save_photo(STOCK_MEDIA, sid, raw, (file.content_type or "").strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with db() as con:
+        con.execute(
+            "UPDATE stock_items SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? WHERE id=?",
+            (info["id"], info["size_bytes"], info["width"], info["height"], sid),
+        )
+    if old_photo_id:
+        media_mod.delete_photo(STOCK_MEDIA, sid, old_photo_id)
+    return {"id": info["id"], "url": f"/api/stock/{sid}/photo", "thumb_url": f"/api/stock/{sid}/photo/thumb"}
+
+
+@app.delete("/api/stock/{sid}/photo")
+def api_del_stock_photo(sid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        pid = row["photo_id"]
+        con.execute(
+            "UPDATE stock_items SET photo_id=NULL, photo_size_bytes=NULL, photo_width=NULL, photo_height=NULL WHERE id=?",
+            (sid,),
+        )
+    if pid:
+        media_mod.delete_photo(STOCK_MEDIA, sid, pid)
+    return {"ok": True}
+
+
+@app.get("/api/stock/{sid}/photo")
+def api_get_stock_photo(sid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM stock_items WHERE id=?", (sid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(STOCK_MEDIA, sid, pid, thumb=False) if pid else None
+    if not path:
+        raise HTTPException(404, "photo introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+@app.get("/api/stock/{sid}/photo/thumb")
+def api_get_stock_thumb(sid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM stock_items WHERE id=?", (sid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(STOCK_MEDIA, sid, pid, thumb=True) if pid else None
+    if not path:
+        raise HTTPException(404, "vignette introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+# --- Pick a card ---
+
+def _pick_a_card_candidates(st: dict, cs: dict) -> list[dict]:
+    items_by_id = {i["id"]: i for i in st["items"]}
+    candidates = []
+    with db() as con:
+        sheets = [dict(r) for r in con.execute("SELECT * FROM card_sheets WHERE status='open'")]
+        # Items en veille créés automatiquement comme simple point d'attache
+        # pour les relevés du stock (aucun item_id fourni à la création d'une
+        # ligne) : ce ne sont pas des cartes à acheter, à exclure des candidats.
+        stock_linked_ids = {r["linked_item_id"] for r in con.execute(
+            "SELECT DISTINCT linked_item_id FROM stock_items WHERE linked_item_id IS NOT NULL"
+        )}
+    fx_rate = fetch_jpy_eur_rate()
+    for row in sheets:
+        view = _card_sheet_view(row, items_by_id, cs, fx_rate)
+        prudent = view["computed"]["scenarios"]["prudent"]
+        if not prudent:
+            continue
+        ok_listings = [l for l in view["listings"] if l.get("verdict") is True]
+        # Priorité à une annonce RÉELLEMENT trouvée sous le seuil (opportunité
+        # concrète) ; sinon repli sur le plafond théorique du calcul inversé.
+        cost_basis = min((l["total_cost"] for l in ok_listings), default=prudent["c_max"])
+        item = items_by_id.get(row["item_id"]) if row["item_id"] else None
+        candidates.append({
+            "kind": "sheet", "id": row["id"], "name": view.get("item_name") or row["name"] or "Fiche sans nom",
+            "cost_basis": round(cost_basis, 2), "net_estime": prudent["net"]["net"],
+            "linked_item_id": row["item_id"], "type": row["type"], "grade": row["grade"],
+            "target_price": prudent["resale_price"], "est_value": item["est"]["value"] if item else None,
+            "market_sales_per_month": item["stats"]["sales_month"] if item else None,
+            "photo_url": view.get("photo_thumb_url"),
+        })
+    for item in st["items"]:
+        if item["status"] != "watch" or item["id"] in stock_linked_ids:
+            continue
+        est_val = item["est"]["value"]
+        if not est_val:
+            continue
+        best_net = None
+        for plat in card_deals_mod.SELL_PLATFORMS:
+            sf = cs["sell_fees"].get(plat, {})
+            n = card_deals_mod.net_from_resale(est_val, sf, 0.0)["net"]
+            if best_net is None or n > best_net:
+                best_net = n
+        cost_basis = item["target_price"] or est_val
+        candidates.append({
+            "kind": "watch", "id": item["id"], "name": item["name"],
+            "cost_basis": round(cost_basis, 2), "net_estime": best_net,
+            "linked_item_id": item["id"], "type": item["type"], "grade": item["grade"],
+            "target_price": item["target_price"] or None, "est_value": est_val,
+            "market_sales_per_month": item["stats"]["sales_month"],
+            "photo_url": ((item["photos"] or [{}])[0].get("thumb_url") if item.get("photos") else None),
+        })
+    return candidates
+
+
+@app.get("/api/stock/pick-a-card")
+def api_pick_a_card(budget: float | None = None):
+    st = build_state(snapshot=False)
+    cs = get_card_settings()
+    candidates = _pick_a_card_candidates(st, cs)
+    with db() as con:
+        sold_rows = [dict(r) for r in con.execute("SELECT * FROM stock_items WHERE status='vendu'")]
+        all_events = [dict(r) for r in con.execute("SELECT * FROM stock_events ORDER BY at")]
+    events_by_stock: dict[str, list] = {}
+    for e in all_events:
+        events_by_stock.setdefault(e["stock_id"], []).append(e)
+    return stock_mod.build_pick_a_card(candidates, sold_rows, events_by_stock, cs, budget=budget)
+
+
 # --------------------------------------------------------------------------- export
 
 def _deals_export_list() -> list[dict]:
@@ -1836,13 +2274,25 @@ def _card_deals_export() -> dict:
     return {"card_sheets": sheets, "import_orders": orders, "card_deal_settings": get_card_settings()}
 
 
+def _stock_export() -> dict:
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM stock_items")]
+        events = [dict(r) for r in con.execute("SELECT * FROM stock_events")]
+    events_by_stock: dict[str, list] = {}
+    for e in events:
+        events_by_stock.setdefault(e["stock_id"], []).append(e)
+    for r in rows:
+        r["events"] = events_by_stock.get(r["id"], [])
+    return {"stock_items": rows}
+
+
 @app.get("/api/export")
 def api_export():
     st = build_state(snapshot=False)
     return {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
-        **_card_deals_export(),
+        **_card_deals_export(), **_stock_export(),
     }
 
 
@@ -1854,7 +2304,7 @@ def api_export_zip():
     payload = {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
-        **_card_deals_export(),
+        **_card_deals_export(), **_stock_export(),
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1871,6 +2321,10 @@ def api_export_zip():
             for f in media_mod.list_item_files(CARD_SHEET_MEDIA, cs["id"]):
                 # Namespace séparé pour les fiches carte : card_sheet_media/<sheet_id>/<filename>
                 z.write(f, arcname=f"card_sheet_media/{cs['id']}/{f.name}")
+        for si in payload["stock_items"]:
+            for f in media_mod.list_item_files(STOCK_MEDIA, si["id"]):
+                # Namespace séparé pour le stock : stock_media/<stock_id>/<filename>
+                z.write(f, arcname=f"stock_media/{si['id']}/{f.name}")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -1893,6 +2347,7 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
     zip_photos: dict[str, dict[str, bytes]] = {}       # {item_id: {filename: bytes}}
     zip_deal_photos: dict[str, dict[str, bytes]] = {}  # {deal_id: {filename: bytes}}
     zip_card_photos: dict[str, dict[str, bytes]] = {}  # {sheet_id: {filename: bytes}}
+    zip_stock_photos: dict[str, dict[str, bytes]] = {}  # {stock_id: {filename: bytes}}
     if raw[:4] == b"PK\x03\x04":  # signature ZIP
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -1912,6 +2367,9 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     elif len(parts) == 3 and parts[0] == "card_sheet_media" and parts[2]:
                         sid, fname = parts[1], parts[2]
                         zip_card_photos.setdefault(sid, {})[fname] = z.read(name)
+                    elif len(parts) == 3 and parts[0] == "stock_media" and parts[2]:
+                        stid, fname = parts[1], parts[2]
+                        zip_stock_photos.setdefault(stid, {})[fname] = z.read(name)
         except zipfile.BadZipFile:
             raise HTTPException(400, "ZIP invalide")
     else:
@@ -1936,6 +2394,8 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute("DELETE FROM card_sheets")
             con.execute("DELETE FROM import_order_lines")
             con.execute("DELETE FROM import_orders")
+            con.execute("DELETE FROM stock_events")
+            con.execute("DELETE FROM stock_items")
         for it in items:
             iid = str(it.get("id") or nid())
             d = clean({**it, "set_name": it.get("set_name") or it.get("set", "")})
@@ -2091,6 +2551,43 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                      lnd["resale_target_eur"], lnd["resale_platform"],
                      int(ln.get("sort_order") if ln.get("sort_order") is not None else i)),
                 )
+        for si in data.get("stock_items") or []:
+            stid = str(si.get("id") or nid())
+            sd = clean_stock_item(si)
+            photo_id = photo_size = photo_w = photo_h = None
+            src_photo_id = si.get("photo_id")
+            if src_photo_id:
+                files_for_stock = zip_stock_photos.get(stid, {})
+                fname, thumb_name = f"{src_photo_id}.webp", f"{src_photo_id}.thumb.webp"
+                if fname in files_for_stock:
+                    d = STOCK_MEDIA / stid
+                    d.mkdir(parents=True, exist_ok=True)
+                    (d / fname).write_bytes(files_for_stock[fname])
+                    if thumb_name in files_for_stock:
+                        (d / thumb_name).write_bytes(files_for_stock[thumb_name])
+                    photo_id = src_photo_id
+                    photo_size = si.get("photo_size_bytes")
+                    photo_w = si.get("photo_width")
+                    photo_h = si.get("photo_height")
+            con.execute(
+                f"INSERT OR REPLACE INTO stock_items(id,{','.join(STOCK_FIELDS)},"
+                "photo_id,photo_size_bytes,photo_width,photo_height,status,"
+                "sale_price,sale_platform,sale_net,sale_net_manual,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?)",
+                (stid, *[sd[f] for f in STOCK_FIELDS],
+                 photo_id, photo_size, photo_w, photo_h,
+                 si.get("status") if si.get("status") in stock_mod.STATUSES else "achete",
+                 si.get("sale_price"), si.get("sale_platform"),
+                 si.get("sale_net"), int(bool(si.get("sale_net_manual"))),
+                 str(si.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            for ev in si.get("events") or []:
+                con.execute(
+                    "INSERT OR REPLACE INTO stock_events(id,stock_id,from_status,to_status,at,note) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(ev.get("id") or nid()), stid, ev.get("from_status"), ev.get("to_status"),
+                     str(ev.get("at") or datetime.now().isoformat(timespec="seconds")), str(ev.get("note", ""))[:500]),
+                )
     if isinstance(data.get("settings"), dict):
         api_settings(data["settings"])
     if isinstance(data.get("deal_params"), dict):
@@ -2099,7 +2596,8 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
         put_card_settings(data["card_deal_settings"])
     return {"ok": True, "items": len(items), "deals": len(data.get("deals") or []),
             "card_sheets": len(data.get("card_sheets") or []),
-            "import_orders": len(data.get("import_orders") or [])}
+            "import_orders": len(data.get("import_orders") or []),
+            "stock_items": len(data.get("stock_items") or [])}
 
 
 @app.get("/api/ping")
