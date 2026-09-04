@@ -678,7 +678,7 @@ function itemSheet(id){
   openSheet(`
     <div class="sheet-head">
       <div><span class="eyebrow">${watch?"En veille · ":""}${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
-        <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span></div>
+        <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span> ${cardBadge(i.card_id)}</div>
       <button class="btn ghost" data-close-btn>Fermer</button>
     </div>
     ${photosBlock}
@@ -883,7 +883,8 @@ function cardSheetSheet(id){
       <div style="display:flex;gap:12px;flex:1;min-width:0">
         ${cardSheetPhotoBlock(s)}
         <div style="min-width:0"><span class="eyebrow">${s?"Fiche carte":"Nouvelle"}</span>
-          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s?esc(s.item_name||s.name||"Fiche"):"Fiche carte"}</h2></div>
+          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s?esc(s.item_name||s.name||"Fiche"):"Fiche carte"}</h2>
+          ${s?cardBadge(s.card_id):""}</div>
       </div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
 
@@ -1364,7 +1365,8 @@ function stockSheet(id){
       <div style="display:flex;gap:12px;flex:1;min-width:0">
         ${stockPhotoBlock(r)}
         <div style="min-width:0"><span class="eyebrow">${r?STOCK_LABELS[r.status]:"Nouvelle"}</span>
-          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r?esc(r.name):"Carte en stock"}</h2></div>
+          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r?esc(r.name):"Carte en stock"}</h2>
+          ${r?cardBadge(r.card_id):""}</div>
       </div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
 
@@ -1468,6 +1470,105 @@ function pickACardSheet(res, budget){
   `,"center");
 }
 
+/* ======================================================================= */
+/* Référentiel de cartes — plomberie, presque rien à l'écran               */
+/* ======================================================================= */
+function cardBadge(cardId){
+  return cardId ? `<button class="tag" data-open-card="${cardId}" style="cursor:pointer;margin-top:4px;display:inline-block">Liée</button>` : "";
+}
+
+async function cardEntrySheet(cardId){
+  const c = await api("/api/cards/"+cardId);
+  const exLabels = {items:"Portefeuille/Veille", card_sheets:"Fiche carte", import_order_lines:"Ligne d'import", stock_items:"Stock"};
+  const rows = (c.exemplaires||[]).map(e=>`
+    <div class="comp" style="grid-template-columns:1fr auto">
+      <span>${exLabels[e.table]||e.table} — ${esc(e.label||"")}</span>
+      <span class="dim">${e.status?esc(e.status):""}</span>
+    </div>`).join("") || `<p class="note">Aucun exemplaire ne référence encore cette carte.</p>`;
+  openSheet(`
+    <div class="sheet-head">
+      <div style="display:flex;gap:12px;flex:1;min-width:0">
+        ${c.photo_url ? `<img src="${c.photo_thumb_url}" alt="" data-open-lightbox="${c.photo_url}"
+            style="width:76px;height:106px;object-fit:cover;border-radius:10px;border:1px solid var(--line);cursor:pointer;flex-shrink:0">` : ""}
+        <div style="min-width:0"><span class="eyebrow">Référentiel</span>
+          <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</h2>
+          <span class="dim" style="font-size:13px">${[c.set_name,c.card_number,c.lang,c.grade].filter(Boolean).map(esc).join(" · ")}</span></div>
+      </div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    ${c.resale_min!=null||c.resale_median!=null||c.resale_max!=null ? `
+      <div class="f3"><div><span class="eyebrow">P25</span><div class="num">${eur(c.resale_min)}</div></div>
+        <div><span class="eyebrow">Médiane</span><div class="num">${eur(c.resale_median)}</div></div>
+        <div><span class="eyebrow">P75</span><div class="num">${eur(c.resale_max)}</div></div></div>` : ""}
+    <hr class="sep">
+    <span class="eyebrow">Exemplaires liés (${(c.exemplaires||[]).length})</span>
+    <div style="margin:8px 0">${rows}</div>
+  `,"center");
+}
+
+async function cardRegistryAdminSheet(){
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Référentiel de cartes</span><h2>Migration</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">Simulation d'abord : rien n'est écrit tant que tu ne cliques pas "Exécuter".</p>
+    <div class="actions" style="justify-content:flex-start"><button class="btn primary" data-cards-preview>Aperçu (simulation)</button></div>
+    <div id="cards-preview-result" style="margin-top:14px"></div>
+    <hr class="sep">
+    <div class="actions" style="justify-content:flex-start"><button class="btn ghost" data-open-merge-screen>Écran de fusion</button></div>
+  `,"center");
+}
+
+function renderMigrationPreview(plan){
+  const host = document.getElementById("cards-preview-result");
+  if(!host) return;
+  host.innerHTML = `
+    <div class="stats">
+      <div class="stat"><span class="eyebrow">Rattachements auto</span><div class="v">${plan.counts.auto}</div></div>
+      <div class="stat"><span class="eyebrow">Propositions</span><div class="v">${plan.counts.proposals}</div></div>
+      <div class="stat"><span class="eyebrow">Créations</span><div class="v">${plan.counts.creations}</div></div>
+    </div>
+    <details style="margin-top:10px"><summary class="eyebrow" style="cursor:pointer">Détail</summary>
+      <div style="margin-top:8px;font-size:12.5px">
+        ${plan.auto_links.map(a=>`<div class="comp" style="grid-template-columns:1fr auto"><span>${esc(a.label||"")} (${a.table})</span><span class="p gain">${(a.score*100).toFixed(0)}%</span></div>`).join("")}
+        ${plan.proposals.map(p=>`<div class="comp" style="grid-template-columns:1fr auto"><span>${esc(p.label_a||"")} ↔ ${esc(p.label_b||"")} (${p.table})</span><span class="p">${(p.score*100).toFixed(0)}%</span></div>`).join("")}
+      </div>
+    </details>
+    <div class="actions" style="justify-content:flex-start;margin-top:10px">
+      <button class="btn primary" data-cards-run>Exécuter la migration</button>
+    </div>`;
+}
+
+async function cardMergeScreen(){
+  const res = await api("/api/cards/merge-suggestions");
+  const rows = (res.suggestions||[]).map(s=>`
+    <div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default">
+      <div style="display:flex;justify-content:space-between;gap:10px">
+        <b>${esc(s.card_a.name)} <span class="dim">↔</span> ${esc(s.card_b.name)}</b>
+        <span class="num">${(s.score*100).toFixed(0)}%</span>
+      </div>
+      <div class="dim" style="font-size:12px">${[s.card_a.set_name,s.card_a.card_number,s.card_a.grade].filter(Boolean).map(esc).join(" · ")}
+        vs ${[s.card_b.set_name,s.card_b.card_number,s.card_b.grade].filter(Boolean).map(esc).join(" · ")}</div>
+      <div class="actions">
+        <button class="btn ghost" data-dismiss-suggestion="${s.id}">Garder séparées</button>
+        <button class="btn primary" data-merge-suggestion="${s.id}" data-loser="${s.card_a.id}" data-winner="${s.card_b.id}">Fusionner</button>
+      </div>
+    </div>`).join("") || `<div class="empty"><b>Aucune proposition</b>Rien en attente de décision.</div>`;
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Référentiel de cartes</span><h2>Écran de fusion</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div style="margin:8px 0">${rows}</div>
+    <hr class="sep">
+    <span class="eyebrow">Fusion manuelle</span>
+    <div class="f2" style="margin-top:8px">
+      <label><span class="lb">Carte à absorber (id)</span><input id="mm-loser" placeholder="id"></label>
+      <label><span class="lb">Carte qui survit (id)</span><input id="mm-winner" placeholder="id"></label>
+    </div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" data-manual-merge>Fusionner</button></div>
+    ${lastMergeId ? `<div class="actions" style="justify-content:flex-start"><button class="btn ghost" data-undo-merge="${lastMergeId}">Annuler la dernière fusion</button></div>` : ""}
+  `,"center");
+}
+
+let lastMergeId = null;
+
 function menuSheet(){
   openSheet(`
     <div class="sheet-head"><div><span class="eyebrow">Menu</span><h2>Actions</h2></div>
@@ -1481,6 +1582,7 @@ function menuSheet(){
       <button class="menu-item" data-action="snapshot">Enregistrer un point (courbe)</button>
       <button class="menu-item" data-action="settings">Réglages de l'estimation</button>
       <button class="menu-item" data-action="card-settings">Réglages achat-revente</button>
+      <button class="menu-item" data-action="card-registry">Référentiel de cartes</button>
       <button class="menu-item" data-action="export">Exporter (JSON)</button>
       <button class="menu-item" data-action="export-zip">Exporter tout (ZIP + photos)</button>
       <button class="menu-item" data-action="import">Importer</button>
@@ -1653,6 +1755,48 @@ document.addEventListener("click", async ev=>{
     if(act==="new-card-sheet") return cardSheetSheet(null);
     if(act==="new-import-order") return importOrderSheet(null);
     if(act==="card-settings") return cardSettingsForm();
+    if(act==="card-registry") return cardRegistryAdminSheet();
+
+    // --- Référentiel de cartes ---
+    const oc = t.closest("[data-open-card]"); if(oc) return cardEntrySheet(oc.dataset.openCard);
+    if(t.closest("[data-cards-preview]")){
+      const plan = await api("/api/cards/migration-preview");
+      return renderMigrationPreview(plan);
+    }
+    if(t.closest("[data-cards-run]")){
+      if(!confirm("Exécuter la migration ? Elle crée les entrées du référentiel et rattache tout ce qui peut l'être.")) return;
+      const res = await api("/api/cards/migration-run", {method:"POST"});
+      alert(`Migration exécutée : ${res.counts.cards_created_from_sheets} carte(s) depuis les fiches, `
+        + `${res.counts.auto_linked} rattachement(s) auto, ${res.counts.cards_created_new} création(s), `
+        + `${res.counts.proposals} proposition(s) en attente dans l'écran de fusion.`);
+      closeSheet(); return cardMergeScreen();
+    }
+    if(t.closest("[data-open-merge-screen]")) return cardMergeScreen();
+    const dms = t.closest("[data-dismiss-suggestion]");
+    if(dms){
+      await api(`/api/cards/merge-suggestions/${dms.dataset.dismissSuggestion}/dismiss`, {method:"POST"});
+      return cardMergeScreen();
+    }
+    const mrg = t.closest("[data-merge-suggestion]");
+    if(mrg){
+      const res = await api("/api/cards/merge", {method:"POST", json:{loser_id:mrg.dataset.loser, winner_id:mrg.dataset.winner}});
+      lastMergeId = res.merge_id;
+      return cardMergeScreen();
+    }
+    if(t.closest("[data-manual-merge]")){
+      const loser = document.getElementById("mm-loser").value.trim();
+      const winner = document.getElementById("mm-winner").value.trim();
+      if(!loser || !winner) return;
+      const res = await api("/api/cards/merge", {method:"POST", json:{loser_id:loser, winner_id:winner}});
+      lastMergeId = res.merge_id;
+      return cardMergeScreen();
+    }
+    const undo = t.closest("[data-undo-merge]");
+    if(undo){
+      await api(`/api/cards/merge/${undo.dataset.undoMerge}/undo`, {method:"POST"});
+      lastMergeId = null;
+      return cardMergeScreen();
+    }
 
     const os = t.closest("[data-open-sheet]"); if(os) return cardSheetSheet(os.dataset.openSheet);
     const oo = t.closest("[data-open-order]"); if(oo) return importOrderSheet(oo.dataset.openOrder);

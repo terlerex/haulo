@@ -32,6 +32,7 @@ import media as media_mod
 import deals as deals_mod
 import card_deals as card_deals_mod
 import stock as stock_mod
+import cards as cards_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -43,6 +44,7 @@ MEDIA = media_mod.media_dir(DB)  # <dossier DB>/media, jamais /data en dur
 DEAL_MEDIA = MEDIA / "_deals"     # sous-namespace dédié pour ne pas collisionner avec les item_id
 CARD_SHEET_MEDIA = MEDIA / "_card_sheets"  # une seule photo par fiche, même pipeline que items/deals
 STOCK_MEDIA = MEDIA / "_stock"             # idem pour les lignes de stock
+CARD_MEDIA = MEDIA / "_cards"              # photo de référence du référentiel de cartes
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -269,6 +271,55 @@ def init() -> None:
                 at TEXT NOT NULL, note TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS stock_events_stock ON stock_events(stock_id, at);
+
+            -- Référentiel de cartes : une entrée par identité (nom+set+numéro+
+            -- langue+grade), que items/card_sheets/import_order_lines/stock_items
+            -- référencent par card_id (colonnes ajoutées dans migrate(), additif).
+            -- Ne remplace ni ne touche le moteur d'estimation existant (comps sur
+            -- items) : resale_min/median/max et buy_max_computed sont des
+            -- instantanés, pas un recalcul continu.
+            CREATE TABLE IF NOT EXISTS cards(
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL, set_name TEXT DEFAULT '', card_number TEXT DEFAULT '',
+                lang TEXT DEFAULT 'FR', type TEXT NOT NULL DEFAULT 'loose', grade TEXT DEFAULT '',
+                identity_key TEXT NOT NULL,
+                photo_id TEXT, photo_size_bytes INTEGER, photo_width INTEGER, photo_height INTEGER,
+                profit_target_pct REAL,
+                resale_mode TEXT NOT NULL DEFAULT 'auto',
+                resale_min REAL, resale_median REAL, resale_max REAL,
+                buy_max_computed REAL,
+                merged_into_id TEXT REFERENCES cards(id),
+                notes TEXT DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS cards_identity ON cards(identity_key);
+            CREATE TABLE IF NOT EXISTS card_listings(
+                id TEXT PRIMARY KEY,
+                card_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL, url TEXT DEFAULT '',
+                price REAL NOT NULL DEFAULT 0, shipping REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS card_listings_card ON card_listings(card_id);
+            -- Propositions de rapprochement (score intermédiaire) issues de la
+            -- migration ou détectées plus tard : jamais appliquées seules, c'est
+            -- l'écran de fusion qui tranche.
+            CREATE TABLE IF NOT EXISTS card_merge_suggestions(
+                id TEXT PRIMARY KEY,
+                card_a_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                card_b_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                score REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            );
+            -- Journal des fusions : chaque ligne réaffectée est notée avec sa
+            -- valeur précédente, pour qu'une fusion reste annulable (merge_id
+            -- regroupe toutes les lignes d'une même opération).
+            CREATE TABLE IF NOT EXISTS card_merge_log(
+                id TEXT PRIMARY KEY, merge_id TEXT NOT NULL,
+                loser_card_id TEXT NOT NULL, winner_card_id TEXT NOT NULL,
+                affected_table TEXT NOT NULL, affected_id TEXT NOT NULL,
+                previous_card_id TEXT, at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS card_merge_log_merge ON card_merge_log(merge_id);
             """
         )
         migrate(con)
@@ -280,6 +331,9 @@ def migrate(con: sqlite3.Connection) -> None:
         "items": {
             "status": "TEXT NOT NULL DEFAULT 'owned'",   # owned = possédé, watch = en veille
             "target_price": "REAL NOT NULL DEFAULT 0",   # prix d'achat visé sur un item en veille
+            # Lien vers le référentiel de cartes (plomberie) — distinct du fait
+            # d'être "un item" : plusieurs items peuvent partager la même carte.
+            "card_id": "TEXT REFERENCES cards(id)",
         },
         "comps": {
             "sold_count": "INTEGER NOT NULL DEFAULT 1",  # nb de ventes que ce relevé représente
@@ -296,6 +350,7 @@ def migrate(con: sqlite3.Connection) -> None:
             # Montant réel en € si unit_currency='EUR' — jamais reconverti,
             # jamais recalculé au taux de change (ce n'est pas une estimation).
             "unit_price_eur": "REAL",
+            "card_id": "TEXT REFERENCES cards(id)",
         },
         "import_orders": {
             # Montant réellement débité en € pour la part ¥ de la commande,
@@ -317,7 +372,15 @@ def migrate(con: sqlite3.Connection) -> None:
             "photo_size_bytes": "INTEGER",
             "photo_width": "INTEGER",
             "photo_height": "INTEGER",
+            # Lien vers le référentiel de cartes (plomberie, indépendant du lien
+            # item_id qui existe déjà et qui, lui, pointe vers un exemplaire précis).
+            "card_id": "TEXT REFERENCES cards(id)",
+            # Absent du modèle initial des fiches carte ; ajouté pour que
+            # l'identité du référentiel (nom+set+numéro+langue+grade) puisse
+            # s'appuyer dessus. Vide par défaut sur les fiches existantes.
+            "card_number": "TEXT DEFAULT ''",
         },
+        "stock_items": {"card_id": "TEXT REFERENCES cards(id)"},
     }
     for table, cols in add.items():
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -636,6 +699,10 @@ def load_items() -> list[dict]:
         it["comps"] = by_item.get(it["id"], [])
         it["photos"] = photos_by_item.get(it["id"], [])
         it["purchases"] = purchases_by_item.get(it["id"], [])
+        # Photo du référentiel de cartes, séparée de la galerie propre à l'item
+        # (`photos`) : plomberie exposée par l'API, l'interface ne s'en sert pas
+        # encore (pas de retouche visuelle demandée à cette étape).
+        it["card_photo_url"], it["card_photo_thumb_url"] = _resolve_photo_urls(it.get("card_id"), None, None)
     return items
 
 
@@ -1351,11 +1418,9 @@ def _card_sheet_view(row: dict, items_by_id: dict, card_settings: dict, fx_rate:
     d["computed"] = computed
     if d["item_id"] and d["item_id"] in items_by_id:
         d["item_name"] = items_by_id[d["item_id"]]["name"]
-    if d.get("photo_id"):
-        d["photo_url"] = f"/api/card-sheets/{d['id']}/photo"
-        d["photo_thumb_url"] = f"/api/card-sheets/{d['id']}/photo/thumb"
-    else:
-        d["photo_url"] = d["photo_thumb_url"] = None
+    own_url = f"/api/card-sheets/{d['id']}/photo" if d.get("photo_id") else None
+    own_thumb = f"/api/card-sheets/{d['id']}/photo/thumb" if d.get("photo_id") else None
+    d["photo_url"], d["photo_thumb_url"] = _resolve_photo_urls(d.get("card_id"), own_url, own_thumb)
     return d
 
 
@@ -1881,6 +1946,7 @@ def _stock_view(row: dict, events: list[dict]) -> dict:
     d["days_in_status"] = stock_mod.days_in_current_status(d["status"], events)
     d["events"] = events
     d.update(_stock_photo_urls(d))
+    d["photo_url"], d["photo_thumb_url"] = _resolve_photo_urls(d.get("card_id"), d["photo_url"], d["photo_thumb_url"])
     cb = d.get("cost_basis")
     d["expected_margin_pct"] = (round((d["target_price"] - cb) / cb * 100, 1)
                                  if d.get("target_price") and cb else None)
@@ -2239,6 +2305,383 @@ def api_pick_a_card(budget: float | None = None):
     return stock_mod.build_pick_a_card(candidates, sold_rows, events_by_stock, cs, budget=budget)
 
 
+# --------------------------------------------------------- référentiel de cartes
+
+CARD_FIELDS = ["name", "set_name", "card_number", "lang", "type", "grade", "profit_target_pct",
+               "resale_mode", "resale_min", "resale_median", "resale_max", "buy_max_computed", "notes"]
+CARD_REF_TABLES = ["items", "card_sheets", "import_order_lines", "stock_items", "card_listings"]
+
+
+def clean_card(p: dict) -> dict:
+    def numopt(k):
+        v = p.get(k)
+        return float(v) if v not in (None, "") else None
+    return {
+        "name": str(p.get("name", "")).strip()[:200],
+        "set_name": str(p.get("set_name", ""))[:120],
+        "card_number": str(p.get("card_number", ""))[:40],
+        "lang": str(p.get("lang", "FR"))[:10],
+        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "grade": str(p.get("grade", ""))[:40],
+        "profit_target_pct": numopt("profit_target_pct"),
+        "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
+        "resale_min": numopt("resale_min"), "resale_median": numopt("resale_median"), "resale_max": numopt("resale_max"),
+        "buy_max_computed": numopt("buy_max_computed"),
+        "notes": str(p.get("notes", ""))[:2000],
+    }
+
+
+def _identity_fields_items(row: dict) -> dict:
+    return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": "",
+            "lang": row.get("lang") or "", "grade": row.get("grade") or "",
+            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+
+
+def _identity_fields_card_sheet(row: dict) -> dict:
+    return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": row.get("card_number") or "",
+            "lang": row.get("lang") or "", "grade": row.get("grade") or "",
+            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+
+
+def _identity_fields_order_line(row: dict) -> dict:
+    # Saisie volontairement pauvre à l'origine (nom/qté/prix seulement) : peu
+    # de matière pour un rapprochement fiable, le score reflète honnêtement ça.
+    return {"name": row["name"], "set_name": "", "card_number": "", "lang": "", "grade": "",
+            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+
+
+def _identity_fields_stock(row: dict) -> dict:
+    return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": row.get("card_number") or "",
+            "lang": row.get("lang") or "", "grade": row.get("grade") or "",
+            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+
+
+def _card_photo_urls(row: dict) -> dict:
+    if row.get("photo_id"):
+        return {"photo_url": f"/api/cards/{row['id']}/photo", "photo_thumb_url": f"/api/cards/{row['id']}/photo/thumb"}
+    return {"photo_url": None, "photo_thumb_url": None}
+
+
+def _resolve_photo_urls(card_id: str | None, own_url: str | None, own_thumb: str | None) -> tuple:
+    """Règle de surcharge : la photo du référentiel prime si elle existe,
+    sinon on retombe sur la photo propre de l'exemplaire (jamais d'écran vide
+    juste parce que la carte liée n'a pas encore de photo)."""
+    if card_id:
+        with db() as con:
+            row = con.execute("SELECT photo_id FROM cards WHERE id=?", (card_id,)).fetchone()
+        if row and row["photo_id"]:
+            return f"/api/cards/{card_id}/photo", f"/api/cards/{card_id}/photo/thumb"
+    return own_url, own_thumb
+
+
+def _card_view(row: dict) -> dict:
+    d = dict(row)
+    d.update(_card_photo_urls(d))
+    exemplaires = []
+    with db() as con:
+        for table, status_field in (("items", "status"), ("card_sheets", "status"),
+                                     ("import_order_lines", None), ("stock_items", "status")):
+            for r in con.execute(f"SELECT * FROM {table} WHERE card_id=?", (d["id"],)):
+                rd = dict(r)
+                exemplaires.append({"table": table, "id": rd["id"], "label": rd.get("name"),
+                                     "status": rd.get(status_field) if status_field else None})
+    d["exemplaires"] = exemplaires
+    return d
+
+
+@app.get("/api/cards")
+def api_list_cards():
+    with db() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM cards WHERE merged_into_id IS NULL ORDER BY name"
+        )]
+    return {"cards": [_card_view(r) for r in rows]}
+
+
+# --- migration : simulation puis exécution ---
+
+def _build_migration_inputs():
+    with db() as con:
+        sheets = [dict(r) for r in con.execute("SELECT * FROM card_sheets")]
+        items = [dict(r) for r in con.execute("SELECT * FROM items WHERE card_id IS NULL")]
+        lines = [dict(r) for r in con.execute("SELECT * FROM import_order_lines WHERE card_id IS NULL")]
+        stocks = [dict(r) for r in con.execute("SELECT * FROM stock_items WHERE card_id IS NULL")]
+    candidates = [{"id": s["id"], **_identity_fields_card_sheet(s)} for s in sheets]
+    unlinked = (
+        [{"table": "items", "id": it["id"], **_identity_fields_items(it)} for it in items]
+        + [{"table": "import_order_lines", "id": l["id"], **_identity_fields_order_line(l)} for l in lines]
+        + [{"table": "stock_items", "id": st["id"], **_identity_fields_stock(st)} for st in stocks]
+    )
+    return sheets, candidates, unlinked
+
+
+@app.get("/api/cards/migration-preview")
+def api_cards_migration_preview():
+    """Lecture seule : ne touche rien, montre ce que /migration-run ferait."""
+    sheets, candidates, unlinked = _build_migration_inputs()
+    plan = cards_mod.build_migration_plan(candidates, unlinked)
+    already_migrated = sum(1 for s in sheets if s.get("card_id"))
+    plan["already_migrated_sheets"] = already_migrated
+    return plan
+
+
+@app.post("/api/cards/migration-run")
+def api_cards_migration_run():
+    """Rejouable sans dégât : toute ligne déjà pourvue d'un card_id est ignorée."""
+    sheets, candidates, unlinked = _build_migration_inputs()
+    plan = cards_mod.build_migration_plan(candidates, unlinked)
+    now = datetime.now().isoformat(timespec="seconds")
+    sheet_to_card: dict[str, str] = {}
+    counts = {"cards_created_from_sheets": 0, "cards_created_new": 0, "auto_linked": 0, "proposals": 0}
+    cs = get_card_settings()
+    items_by_id = {i["id"]: i for i in build_state(snapshot=False)["items"]}
+
+    with db() as con:
+        for s in sheets:
+            if s.get("card_id"):
+                sheet_to_card[s["id"]] = s["card_id"]
+                continue
+            f = _identity_fields_card_sheet(s)
+            cid = nid()
+            buy_max = None
+            try:
+                view = _card_sheet_view(s, items_by_id, cs, None)
+                prudent = view["computed"]["scenarios"]["prudent"]
+                buy_max = prudent["c_max"] if prudent else None
+            except Exception:
+                buy_max = None
+            con.execute(
+                "INSERT INTO cards(id,name,set_name,card_number,lang,type,grade,identity_key,"
+                "profit_target_pct,resale_mode,resale_min,resale_median,resale_max,buy_max_computed,notes,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cid, f["name"], f["set_name"], f["card_number"], f["lang"], f["type"], f["grade"],
+                 cards_mod.identity_key(f["name"], f["set_name"], f["card_number"], f["lang"], f["grade"]),
+                 s.get("profit_target_pct"), s.get("resale_mode") or "auto",
+                 s.get("resale_min"), s.get("resale_median"), s.get("resale_max"), buy_max,
+                 s.get("notes") or "", now),
+            )
+            con.execute("UPDATE card_sheets SET card_id=? WHERE id=?", (cid, s["id"]))
+            sheet_to_card[s["id"]] = cid
+            counts["cards_created_from_sheets"] += 1
+
+        for link in plan["auto_links"]:
+            real_card_id = sheet_to_card.get(link["card_id"], link["card_id"])
+            con.execute(f"UPDATE {link['table']} SET card_id=? WHERE id=?", (real_card_id, link["id"]))
+            counts["auto_linked"] += 1
+
+        for rec in plan["creations"]:
+            cid = nid()
+            con.execute(
+                "INSERT INTO cards(id,name,set_name,card_number,lang,type,grade,identity_key,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (cid, rec["name"], rec.get("set_name") or "", rec.get("card_number") or "",
+                 rec.get("lang") or "", rec.get("type") or "loose", rec.get("grade") or "",
+                 cards_mod.identity_key(rec["name"], rec.get("set_name"), rec.get("card_number"),
+                                         rec.get("lang"), rec.get("grade")), now),
+            )
+            con.execute(f"UPDATE {rec['table']} SET card_id=? WHERE id=?", (cid, rec["id"]))
+            rec["_new_card_id"] = cid
+            counts["cards_created_new"] += 1
+
+        creation_index = {(r["table"], r["id"]): r["_new_card_id"] for r in plan["creations"]}
+        for prop in plan["proposals"]:
+            new_card_id = creation_index.get((prop["table"], prop["id"]))
+            other_card_id = sheet_to_card.get(prop["candidate_card_id"], prop["candidate_card_id"])
+            if not new_card_id or new_card_id == other_card_id:
+                continue
+            con.execute(
+                "INSERT INTO card_merge_suggestions(id,card_a_id,card_b_id,score,status,created_at) VALUES(?,?,?,?,?,?)",
+                (nid(), new_card_id, other_card_id, prop["score"], "pending", now),
+            )
+            counts["proposals"] += 1
+
+    return {"ok": True, "counts": counts}
+
+
+# --- écran de fusion ---
+
+@app.get("/api/cards/merge-suggestions")
+def api_list_merge_suggestions():
+    with db() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM card_merge_suggestions WHERE status='pending' ORDER BY created_at DESC"
+        )]
+        cards_by_id = {r["id"]: dict(r) for r in con.execute("SELECT * FROM cards")}
+    out = []
+    for r in rows:
+        a, b = cards_by_id.get(r["card_a_id"]), cards_by_id.get(r["card_b_id"])
+        if not a or not b:
+            continue
+        out.append({**r, "card_a": {**a, **_card_photo_urls(a)}, "card_b": {**b, **_card_photo_urls(b)}})
+    return {"suggestions": out}
+
+
+@app.post("/api/cards/merge-suggestions/{sid}/dismiss")
+def api_dismiss_merge_suggestion(sid: str):
+    with db() as con:
+        cur = con.execute("UPDATE card_merge_suggestions SET status='dismissed' WHERE id=? AND status='pending'", (sid,))
+        if not cur.rowcount:
+            raise HTTPException(404, "proposition introuvable")
+    return {"ok": True}
+
+
+@app.post("/api/cards/merge")
+def api_merge_cards(p: dict = Body(...)):
+    """Fusionne loser_id dans winner_id : toutes les lignes qui référençaient
+    loser basculent sur winner. loser n'est jamais supprimée (tombstone
+    merged_into_id) : la fusion reste annulable via /merge/{merge_id}/undo."""
+    loser_id, winner_id = p.get("loser_id"), p.get("winner_id")
+    if not loser_id or not winner_id or loser_id == winner_id:
+        raise HTTPException(400, "loser_id et winner_id requis et différents")
+    merge_id = nid()
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        if not con.execute("SELECT 1 FROM cards WHERE id=?", (loser_id,)).fetchone() or \
+           not con.execute("SELECT 1 FROM cards WHERE id=?", (winner_id,)).fetchone():
+            raise HTTPException(404, "carte introuvable")
+        for table in CARD_REF_TABLES:
+            rows = con.execute(f"SELECT id, card_id FROM {table} WHERE card_id=?", (loser_id,)).fetchall()
+            for r in rows:
+                con.execute(f"UPDATE {table} SET card_id=? WHERE id=?", (winner_id, r["id"]))
+                con.execute(
+                    "INSERT INTO card_merge_log(id,merge_id,loser_card_id,winner_card_id,affected_table,"
+                    "affected_id,previous_card_id,at) VALUES(?,?,?,?,?,?,?,?)",
+                    (nid(), merge_id, loser_id, winner_id, table, r["id"], r["card_id"], now),
+                )
+        con.execute("UPDATE cards SET merged_into_id=? WHERE id=?", (winner_id, loser_id))
+        con.execute(
+            "UPDATE card_merge_suggestions SET status='merged' WHERE status='pending' AND "
+            "((card_a_id=? AND card_b_id=?) OR (card_a_id=? AND card_b_id=?))",
+            (loser_id, winner_id, winner_id, loser_id),
+        )
+    return {"ok": True, "merge_id": merge_id}
+
+
+@app.post("/api/cards/merge/{merge_id}/undo")
+def api_undo_merge(merge_id: str):
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM card_merge_log WHERE merge_id=?", (merge_id,))]
+        if not rows:
+            raise HTTPException(404, "fusion introuvable (déjà annulée ou id inconnu)")
+        loser_id, winner_id = rows[0]["loser_card_id"], rows[0]["winner_card_id"]
+        for r in rows:
+            con.execute(f"UPDATE {r['affected_table']} SET card_id=? WHERE id=?",
+                        (r["previous_card_id"], r["affected_id"]))
+        con.execute("UPDATE cards SET merged_into_id=NULL WHERE id=?", (loser_id,))
+        con.execute("DELETE FROM card_merge_log WHERE merge_id=?", (merge_id,))
+        # Remet en attente la proposition correspondante, sinon elle reste
+        # marquée "merged" alors que la fusion vient d'être défaite.
+        con.execute(
+            "UPDATE card_merge_suggestions SET status='pending' WHERE status='merged' AND "
+            "((card_a_id=? AND card_b_id=?) OR (card_a_id=? AND card_b_id=?))",
+            (loser_id, winner_id, winner_id, loser_id),
+        )
+    return {"ok": True}
+
+
+
+@app.get("/api/cards/{cid}")
+def api_get_card(cid: str):
+    with db() as con:
+        row = con.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "carte introuvable")
+    return _card_view(dict(row))
+
+
+@app.put("/api/cards/{cid}")
+def api_edit_card(cid: str, p: dict = Body(...)):
+    d = clean_card(p)
+    if not d["name"]:
+        raise HTTPException(400, "nom manquant")
+    ik = cards_mod.identity_key(d["name"], d["set_name"], d["card_number"], d["lang"], d["grade"])
+    with db() as con:
+        cur = con.execute(
+            f"UPDATE cards SET {','.join(f + '=?' for f in CARD_FIELDS)}, identity_key=? WHERE id=?",
+            (*[d[f] for f in CARD_FIELDS], ik, cid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "carte introuvable")
+    return {"ok": True}
+
+
+@app.delete("/api/cards/{cid}")
+def api_del_card(cid: str):
+    """Refuse, ne cascade jamais : une carte encore référencée doit d'abord
+    être détachée (ou ses exemplaires supprimés) explicitement ailleurs."""
+    with db() as con:
+        for table in ("items", "card_sheets", "import_order_lines", "stock_items"):
+            if con.execute(f"SELECT 1 FROM {table} WHERE card_id=?", (cid,)).fetchone():
+                raise HTTPException(400, f"carte encore référencée ({table}) : détache-la d'abord")
+        cur = con.execute("DELETE FROM cards WHERE id=?", (cid,))
+        if not cur.rowcount:
+            raise HTTPException(404, "carte introuvable")
+    media_mod.delete_item_dir(CARD_MEDIA, cid)
+    return {"ok": True}
+
+
+# --- photo de référence (une seule, propagée à tous les exemplaires liés) ---
+
+@app.post("/api/cards/{cid}/photo")
+async def api_add_card_photo(cid: str, file: UploadFile = File(...)):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM cards WHERE id=?", (cid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "carte introuvable")
+        old_photo_id = row["photo_id"]
+    raw = await file.read()
+    try:
+        info = media_mod.save_photo(CARD_MEDIA, cid, raw, (file.content_type or "").strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with db() as con:
+        con.execute(
+            "UPDATE cards SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? WHERE id=?",
+            (info["id"], info["size_bytes"], info["width"], info["height"], cid),
+        )
+    if old_photo_id:
+        media_mod.delete_photo(CARD_MEDIA, cid, old_photo_id)
+    return {"id": info["id"], "url": f"/api/cards/{cid}/photo", "thumb_url": f"/api/cards/{cid}/photo/thumb"}
+
+
+@app.delete("/api/cards/{cid}/photo")
+def api_del_card_photo(cid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM cards WHERE id=?", (cid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "carte introuvable")
+        pid = row["photo_id"]
+        con.execute(
+            "UPDATE cards SET photo_id=NULL, photo_size_bytes=NULL, photo_width=NULL, photo_height=NULL WHERE id=?",
+            (cid,),
+        )
+    if pid:
+        media_mod.delete_photo(CARD_MEDIA, cid, pid)
+    return {"ok": True}
+
+
+@app.get("/api/cards/{cid}/photo")
+def api_get_card_photo(cid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM cards WHERE id=?", (cid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(CARD_MEDIA, cid, pid, thumb=False) if pid else None
+    if not path:
+        raise HTTPException(404, "photo introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
+@app.get("/api/cards/{cid}/photo/thumb")
+def api_get_card_thumb(cid: str):
+    with db() as con:
+        row = con.execute("SELECT photo_id FROM cards WHERE id=?", (cid,)).fetchone()
+    pid = row["photo_id"] if row else None
+    path = media_mod.photo_path(CARD_MEDIA, cid, pid, thumb=True) if pid else None
+    if not path:
+        raise HTTPException(404, "vignette introuvable")
+    return FileResponse(path, media_type="image/webp")
+
+
 # --------------------------------------------------------------------------- export
 
 def _deals_export_list() -> list[dict]:
@@ -2286,13 +2729,27 @@ def _stock_export() -> dict:
     return {"stock_items": rows}
 
 
+def _cards_export() -> dict:
+    with db() as con:
+        cards = [dict(r) for r in con.execute("SELECT * FROM cards")]
+        listings = [dict(r) for r in con.execute("SELECT * FROM card_listings")]
+        suggestions = [dict(r) for r in con.execute("SELECT * FROM card_merge_suggestions")]
+        log = [dict(r) for r in con.execute("SELECT * FROM card_merge_log")]
+    listings_by_card: dict[str, list] = {}
+    for l in listings:
+        listings_by_card.setdefault(l["card_id"], []).append(l)
+    for c in cards:
+        c["listings"] = listings_by_card.get(c["id"], [])
+    return {"cards": cards, "card_merge_suggestions": suggestions, "card_merge_log": log}
+
+
 @app.get("/api/export")
 def api_export():
     st = build_state(snapshot=False)
     return {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
-        **_card_deals_export(), **_stock_export(),
+        **_card_deals_export(), **_stock_export(), **_cards_export(),
     }
 
 
@@ -2304,7 +2761,7 @@ def api_export_zip():
     payload = {
         "items": st["items"], "snapshots": st["snapshots"], "settings": st["settings"],
         "deals": _deals_export_list(), "deal_params": get_deal_params(),
-        **_card_deals_export(), **_stock_export(),
+        **_card_deals_export(), **_stock_export(), **_cards_export(),
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -2325,6 +2782,10 @@ def api_export_zip():
             for f in media_mod.list_item_files(STOCK_MEDIA, si["id"]):
                 # Namespace séparé pour le stock : stock_media/<stock_id>/<filename>
                 z.write(f, arcname=f"stock_media/{si['id']}/{f.name}")
+        for c in payload["cards"]:
+            for f in media_mod.list_item_files(CARD_MEDIA, c["id"]):
+                # Namespace séparé pour le référentiel : card_media/<card_id>/<filename>
+                z.write(f, arcname=f"card_media/{c['id']}/{f.name}")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -2348,6 +2809,7 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
     zip_deal_photos: dict[str, dict[str, bytes]] = {}  # {deal_id: {filename: bytes}}
     zip_card_photos: dict[str, dict[str, bytes]] = {}  # {sheet_id: {filename: bytes}}
     zip_stock_photos: dict[str, dict[str, bytes]] = {}  # {stock_id: {filename: bytes}}
+    zip_card_ref_photos: dict[str, dict[str, bytes]] = {}  # {card_id: {filename: bytes}}
     if raw[:4] == b"PK\x03\x04":  # signature ZIP
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -2370,6 +2832,9 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     elif len(parts) == 3 and parts[0] == "stock_media" and parts[2]:
                         stid, fname = parts[1], parts[2]
                         zip_stock_photos.setdefault(stid, {})[fname] = z.read(name)
+                    elif len(parts) == 3 and parts[0] == "card_media" and parts[2]:
+                        crid, fname = parts[1], parts[2]
+                        zip_card_ref_photos.setdefault(crid, {})[fname] = z.read(name)
         except zipfile.BadZipFile:
             raise HTTPException(400, "ZIP invalide")
     else:
@@ -2396,13 +2861,74 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute("DELETE FROM import_orders")
             con.execute("DELETE FROM stock_events")
             con.execute("DELETE FROM stock_items")
+            con.execute("DELETE FROM card_merge_log")
+            con.execute("DELETE FROM card_merge_suggestions")
+            con.execute("DELETE FROM card_listings")
+            con.execute("DELETE FROM cards")
+        # Les cartes du référentiel doivent exister AVANT tout ce qui les
+        # référence (card_id REFERENCES cards(id), contrainte FK immédiate) :
+        # restaurées en premier, dans cette même transaction.
+        for c in data.get("cards") or []:
+            crid = str(c.get("id") or nid())
+            cd = clean_card(c)
+            ik = cards_mod.identity_key(cd["name"], cd["set_name"], cd["card_number"], cd["lang"], cd["grade"])
+            photo_id = photo_size = photo_w = photo_h = None
+            src_photo_id = c.get("photo_id")
+            if src_photo_id:
+                files_for_card = zip_card_ref_photos.get(crid, {})
+                fname, thumb_name = f"{src_photo_id}.webp", f"{src_photo_id}.thumb.webp"
+                if fname in files_for_card:
+                    dpath = CARD_MEDIA / crid
+                    dpath.mkdir(parents=True, exist_ok=True)
+                    (dpath / fname).write_bytes(files_for_card[fname])
+                    if thumb_name in files_for_card:
+                        (dpath / thumb_name).write_bytes(files_for_card[thumb_name])
+                    photo_id = src_photo_id
+                    photo_size = c.get("photo_size_bytes")
+                    photo_w = c.get("photo_width")
+                    photo_h = c.get("photo_height")
+            con.execute(
+                f"INSERT OR REPLACE INTO cards(id,{','.join(CARD_FIELDS)},identity_key,"
+                "photo_id,photo_size_bytes,photo_width,photo_height,merged_into_id,created_at) "
+                f"VALUES(?,{','.join('?' * len(CARD_FIELDS))},?,?,?,?,?,?,?)",
+                (crid, *[cd[f] for f in CARD_FIELDS], ik, photo_id, photo_size, photo_w, photo_h,
+                 c.get("merged_into_id"),
+                 str(c.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            for lst in c.get("listings") or []:
+                con.execute(
+                    "INSERT OR REPLACE INTO card_listings(id,card_id,platform,url,price,shipping,created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (str(lst.get("id") or nid()), crid,
+                     lst.get("platform") if lst.get("platform") in card_deals_mod.BUY_PLATFORMS else "ebay",
+                     str(lst.get("url", ""))[:500], max(0.0, float(lst.get("price") or 0)),
+                     max(0.0, float(lst.get("shipping") or 0)),
+                     str(lst.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+                )
+        for sug in data.get("card_merge_suggestions") or []:
+            con.execute(
+                "INSERT OR REPLACE INTO card_merge_suggestions(id,card_a_id,card_b_id,score,status,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (str(sug.get("id") or nid()), sug.get("card_a_id"), sug.get("card_b_id"),
+                 float(sug.get("score") or 0), sug.get("status") or "pending",
+                 str(sug.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+        for lg in data.get("card_merge_log") or []:
+            con.execute(
+                "INSERT OR REPLACE INTO card_merge_log(id,merge_id,loser_card_id,winner_card_id,"
+                "affected_table,affected_id,previous_card_id,at) VALUES(?,?,?,?,?,?,?,?)",
+                (str(lg.get("id") or nid()), lg.get("merge_id"), lg.get("loser_card_id"), lg.get("winner_card_id"),
+                 lg.get("affected_table"), lg.get("affected_id"), lg.get("previous_card_id"),
+                 str(lg.get("at") or datetime.now().isoformat(timespec="seconds"))),
+            )
         for it in items:
             iid = str(it.get("id") or nid())
             d = clean({**it, "set_name": it.get("set_name") or it.get("set", "")})
             con.execute(
-                f"INSERT OR REPLACE INTO items(id,{','.join(FIELDS)},created_at) "
-                f"VALUES(?,{','.join('?' * len(FIELDS))},?)",
-                (iid, *[d[f] for f in FIELDS], datetime.now().isoformat(timespec="seconds")),
+                f"INSERT OR REPLACE INTO items(id,{','.join(FIELDS)},card_id,created_at) "
+                f"VALUES(?,{','.join('?' * len(FIELDS))},?,?)",
+                (iid, *[d[f] for f in FIELDS], it.get("card_id"),
+                 datetime.now().isoformat(timespec="seconds")),
             )
             for c in it.get("comps") or []:
                 con.execute(
@@ -2511,10 +3037,10 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     photo_h = cs.get("photo_height")
             con.execute(
                 f"INSERT OR REPLACE INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},"
-                "photo_id,photo_size_bytes,photo_width,photo_height,created_at) "
-                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?,?,?,?,?)",
+                "photo_id,photo_size_bytes,photo_width,photo_height,card_id,card_number,created_at) "
+                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?,?,?,?,?,?,?)",
                 (sid, *[csd[f] for f in CARD_SHEET_FIELDS],
-                 photo_id, photo_size, photo_w, photo_h,
+                 photo_id, photo_size, photo_w, photo_h, cs.get("card_id"), str(cs.get("card_number", ""))[:40],
                  str(cs.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for lst in cs.get("listings") or []:
@@ -2544,12 +3070,12 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                 lnd = clean_order_line(ln)
                 con.execute(
                     "INSERT OR REPLACE INTO import_order_lines(id,order_id,item_id,name,type,qty,"
-                    "unit_currency,unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "unit_currency,unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order,card_id) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (str(ln.get("id") or nid()), oid, lnd["item_id"], lnd["name"], lnd["type"], lnd["qty"],
                      lnd["unit_currency"], lnd["unit_price_jpy"], lnd["unit_price_eur"],
                      lnd["resale_target_eur"], lnd["resale_platform"],
-                     int(ln.get("sort_order") if ln.get("sort_order") is not None else i)),
+                     int(ln.get("sort_order") if ln.get("sort_order") is not None else i), ln.get("card_id")),
                 )
         for si in data.get("stock_items") or []:
             stid = str(si.get("id") or nid())
@@ -2572,13 +3098,13 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute(
                 f"INSERT OR REPLACE INTO stock_items(id,{','.join(STOCK_FIELDS)},"
                 "photo_id,photo_size_bytes,photo_width,photo_height,status,"
-                "sale_price,sale_platform,sale_net,sale_net_manual,created_at) "
-                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?)",
+                "sale_price,sale_platform,sale_net,sale_net_manual,card_id,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?,?)",
                 (stid, *[sd[f] for f in STOCK_FIELDS],
                  photo_id, photo_size, photo_w, photo_h,
                  si.get("status") if si.get("status") in stock_mod.STATUSES else "achete",
                  si.get("sale_price"), si.get("sale_platform"),
-                 si.get("sale_net"), int(bool(si.get("sale_net_manual"))),
+                 si.get("sale_net"), int(bool(si.get("sale_net_manual"))), si.get("card_id"),
                  str(si.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for ev in si.get("events") or []:
@@ -2597,7 +3123,8 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
     return {"ok": True, "items": len(items), "deals": len(data.get("deals") or []),
             "card_sheets": len(data.get("card_sheets") or []),
             "import_orders": len(data.get("import_orders") or []),
-            "stock_items": len(data.get("stock_items") or [])}
+            "stock_items": len(data.get("stock_items") or []),
+            "cards": len(data.get("cards") or [])}
 
 
 @app.get("/api/ping")
