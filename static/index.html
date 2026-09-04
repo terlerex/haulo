@@ -70,6 +70,9 @@ nav.tabbar .fab{position:fixed;right:16px;bottom:calc(60px + env(safe-area-inset
     flex:none;display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;font-size:20px;box-shadow:none}
   .fab-label{display:inline;font-size:14px;font-weight:600}
   main.content{padding:24px 28px 40px;max-width:900px}
+  /* Le stock (kanban 5 colonnes) a besoin de toute la largeur ; les autres
+     onglets restent bridés à 900px pour rester lisibles en liste simple. */
+  main.content.full-width{max-width:none}
 }
 
 /* ---- hero ---- */
@@ -193,8 +196,11 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 .b-flat{color:var(--muted);border-color:var(--line)}
 
 /* ---- stock ---- */
-.kanban{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px}
-.kanban-col{flex:1 0 220px;min-width:220px;background:var(--panel);border:1px solid var(--line);
+.kanban{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px}
+/* min-width bas : 5 colonnes doivent tenir sans défiler dès ~950px de contenu
+   utile (fenêtre desktop courante avec la nav latérale) ; flex-grow les étale
+   sur le reste de la largeur disponible quand la fenêtre est plus large. */
+.kanban-col{flex:1 1 160px;min-width:160px;background:var(--panel);border:1px solid var(--line);
   border-radius:var(--r);padding:10px;min-height:80px}
 .kanban-col.drag-over{border-color:var(--accent);background:var(--panel2)}
 .kanban-col h3{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:2px 4px 10px;
@@ -1958,6 +1964,7 @@ document.addEventListener("click", async ev=>{
       document.querySelector("section.hero:not(#stock-hero)").style.display = mode==="stock" ? "none" : "block";
       document.getElementById("rows").style.display = mode==="stock" ? "none" : "flex";
       document.getElementById("stock-body").style.display = mode==="stock" ? "block" : "none";
+      document.querySelector("main.content").classList.toggle("full-width", mode==="stock");
       if(mode==="deals" && !cardDeals) await loadCardDeals();
       if(mode==="stock" && !stockData) await loadStock();
       return renderRows();
