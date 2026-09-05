@@ -259,6 +259,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
     <section class="hero" id="stock-hero" style="display:none">
       <div class="stats" id="stock-kpis"></div>
+      <div id="stock-over-max"></div>
     </section>
 
     <div class="filters" id="items-toolbar">
@@ -284,7 +285,8 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
     </div>
 
     <div class="filters" id="stock-toolbar" style="display:none">
-      <button class="btn primary" data-action="new-stock">+ Nouvelle carte</button>
+      <button class="btn primary" data-open-card-picker>+ Choisir une carte (référentiel)</button>
+      <button class="btn" data-action="new-stock">+ Saisie libre</button>
       <button class="btn primary" data-action="pick-a-card">🎯 Pick a card</button>
     </div>
     <div class="filters" id="stock-tabs" style="display:none">
@@ -984,9 +986,13 @@ function orderLineRow(l, order){
   const flagged = l.profit_pct!=null && l.profit_pct < order.computed.low_margin_alert_pct;
   const gapTxt = l.gap_eur!=null ? `<br><span class="dim" style="font-size:11px">estimé ${eur(l.estimated_landed_total)} → réel ${eur(l.landed_total)} · écart ${eur(l.gap_eur)}${l.gap_pct!=null?` (${pct(l.gap_pct)})`:""}</span>` : "";
   const grossTxt = l.gross_resale_total!=null ? `<br><span class="dim" style="font-size:11px">valeur si revendu au prix affiché : ${eur(l.gross_resale_total)}</span>` : "";
+  const cs = l.card_snapshot;
+  const csTxt = cs ? `<br><span class="dim" style="font-size:11px">${[cs.set_name,cs.card_number,cs.lang,cs.grade].filter(Boolean).map(esc).join(" · ")}</span> ${cardBadge(cs.id)}` : "";
+  const overTxt = l.buy_over_max_eur ? `<br><span class="loss" style="font-size:11px">⚠ dépasse le prix d'achat max de ${eur(l.buy_over_max_eur)}${l.buy_over_max_pct!=null?` (${pct(l.buy_over_max_pct)})`:""}</span>` : "";
+  const costCls = l.buy_over_max_eur ? "loss" : "p";
   return `<div class="comp" style="grid-template-columns:1fr auto auto auto">
-      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${lineAmountLabel(l)} · coût ${eur(l.unit_landed_cost)}</span>${gapTxt}${grossTxt}</span>
-      <span class="p">${eur(l.unit_landed_cost)}</span>
+      <span>${cs&&cs.photo_thumb_url?`<img src="${cs.photo_thumb_url}" alt="" style="width:24px;height:34px;object-fit:cover;border-radius:3px;vertical-align:middle;margin-right:6px">`:""}${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}${csTxt}<br><span class="dim" style="font-size:11px">${lineAmountLabel(l)} · coût ${eur(l.unit_landed_cost)}</span>${overTxt}${gapTxt}${grossTxt}</span>
+      <span class="${costCls}">${eur(l.unit_landed_cost)}</span>
       <span class="${l.profit_pct==null?'dim':flagged?'loss':'gain'}" style="font-size:12px">${l.profit_pct!=null?pct(l.profit_pct):"—"}</span>
       <span>
         <button class="x" data-toggle-line="${l.id}" title="Détail (devise, montant, revente visée)">⚙</button>
@@ -1005,12 +1011,14 @@ function orderLineRow(l, order){
           value="${l.unit_currency==="EUR"?(l.unit_price_eur??""):(l.unit_price_jpy??"")}"></label>
       </div>
       <div class="f2" style="margin:0 0 10px">
-        <label><span class="lb">Revente visée (€)</span><input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
+        <label><span class="lb">Revente visée (€)${l.resale_target_overridden?` <span class="tag" style="font-size:9px">modifié</span>`:""}</span>
+          <input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
         <label><span class="lb">Plateforme</span><select id="ole-platform-${l.id}">
           <option value="">—</option>
           ${Object.entries(SELL_PLATFORM_LABELS).map(([k,lb])=>`<option value="${k}" ${l.resale_platform===k?"selected":""}>${lb}</option>`).join("")}
         </select></label>
       </div>
+      ${l.card_id && l.resale_target_overridden ? `<button class="btn ghost" data-reset-line-resale="${l.id}" style="width:100%;margin-bottom:10px">↺ Revenir à la valeur de la fiche</button>` : ""}
       <button class="btn" data-save-line-detail="${l.id}" data-order="${order.id}" style="width:100%">Enregistrer le détail</button>
     </div>`;
 }
@@ -1140,10 +1148,15 @@ function importOrderSheet(id){
       </div>
     </details>
     ${c.n_flagged?`<div class="warn" style="margin-top:10px">${c.n_flagged} carte${c.n_flagged>1?"s":""} sous le seuil de marge (${c.low_margin_alert_pct}%)</div>`:""}
+    ${c.n_over_max?`<div class="warn" style="margin-top:10px">⚠ ${c.n_over_max} ligne${c.n_over_max>1?"s":""} au-dessus du prix d'achat max</div>`:""}
 
     <hr class="sep">
     <span class="eyebrow">Cartes (${o.lines.length}) — triées par bénéfice</span>
-    <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne. Ajoute au moins le nom, la quantité et le prix (¥ par défaut, ou € si tu connais le montant réel).</p>`}</div>
+    <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne pour l'instant.</p>`}</div>
+    <div class="actions" style="justify-content:flex-start;margin-bottom:10px">
+      <button class="btn primary" data-open-card-picker data-picker-order="${o.id}">+ Choisir une carte (référentiel)</button>
+    </div>
+    <p class="note">Ou saisie libre, sans lien au référentiel :</p>
     <div class="f3">
       <label><span class="lb">Nom</span><input id="ol-name" placeholder="Pikachu promo"></label>
       <label><span class="lb">Quantité</span><input id="ol-qty" type="number" min="1" step="1" value="1"></label>
@@ -1249,6 +1262,8 @@ function renderStockKpis(){
     stockKpiCell("Délai vente médian", wn(k.median_sale_days, v=>v+" j"), `n=${k.median_sale_days.n}`),
     stockKpiCell("Écart prix affiché/obtenu", wn(k.avg_price_gap_pct, pct), `n=${k.avg_price_gap_pct.n}`),
   ].join("");
+  document.getElementById("stock-over-max").innerHTML = stockData.n_over_max
+    ? `<div class="warn" style="margin-top:10px">⚠ ${stockData.n_over_max} carte${stockData.n_over_max>1?"s":""} au-dessus du prix d'achat max</div>` : "";
 }
 
 function stockThumb(r){
@@ -1398,18 +1413,22 @@ function stockSheet(id){
     </div>
     <label><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
     <div class="f3">
-      <label><span class="lb">Coût de revient</span><input id="st-cost" type="number" min="0" step="0.01" value="${r?.cost_basis??""}"></label>
+      <label><span class="lb">Coût de revient</span><input id="st-cost" type="number" min="0" step="0.01" value="${r?.cost_basis??""}"
+        style="${r?.buy_over_max_eur?'color:var(--loss)':''}"></label>
       <label><span class="lb">Date d'achat</span><input id="st-buydate" type="date" value="${r?.buy_date||today()}"></label>
       <label><span class="lb">Plateforme d'achat</span><input id="st-buyplatform" value="${esc(r?.buy_platform||"")}"></label>
     </div>
+    ${r?.buy_over_max_eur ? `<div class="warn">⚠ dépasse le prix d'achat max de ${eur(r.buy_over_max_eur)}${r.buy_over_max_pct!=null?` (${pct(r.buy_over_max_pct)})`:""}</div>` : ""}
     <label><span class="lb">Lien d'achat</span><input id="st-buyurl" value="${esc(r?.buy_url||"")}" placeholder="https://…"></label>
     <div class="f2">
-      <label><span class="lb">Prix de vente visé</span><input id="st-target" type="number" min="0" step="0.01" value="${r?.target_price??""}"></label>
+      <label><span class="lb">Prix de vente visé${r?.target_overridden?` <span class="tag" style="font-size:9px">modifié</span>`:""}</span>
+        <input id="st-target" type="number" min="0" step="0.01" value="${r?.target_price??""}"></label>
       <label><span class="lb">Plateforme de vente visée</span><select id="st-targetplatform">
         <option value="">—</option>
         ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${r?.target_platform===k?"selected":""}>${l}</option>`).join("")}
       </select></label>
     </div>
+    ${r?.card_id && r?.target_overridden ? `<button class="btn ghost" data-reset-stock-target="${r.id}">↺ Revenir à la valeur de la fiche</button>` : ""}
     <label><span class="lb">Notes</span><textarea id="st-notes" rows="2">${esc(r?.notes||"")}</textarea></label>
     ${!r ? `<label style="display:flex;align-items:center;gap:8px"><span class="lb" style="margin:0">Dupliquer ×</span>
       <input id="st-dup" type="number" min="1" step="1" value="1" style="width:70px"></label>` : ""}
@@ -1428,6 +1447,7 @@ function stockSheet(id){
 
     <div class="actions">
       ${r?`<button class="btn danger ghost" data-del-stock="${r.id}">Supprimer</button>`:""}
+      ${r?`<button class="btn ghost" data-dup-stock="${r.id}" title="Créer d'autres exemplaires identiques (dates et statuts indépendants ensuite)">⧉ Dupliquer</button>`:""}
       ${r && r.status!=="conserve" && r.status!=="retourne" ? `
         <button class="btn ghost" data-stock-status="${r.id}" data-to-status="retourne">Retourné</button>
         <button class="btn ghost" data-stock-status="${r.id}" data-to-status="conserve">Garder (portefeuille)</button>` : ""}
@@ -1509,13 +1529,137 @@ async function cardEntrySheet(cardId){
           <span class="dim" style="font-size:13px">${[c.set_name,c.card_number,c.lang,c.grade].filter(Boolean).map(esc).join(" · ")}</span></div>
       </div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
-    ${c.resale_min!=null||c.resale_median!=null||c.resale_max!=null ? `
-      <div class="f3"><div><span class="eyebrow">P25</span><div class="num">${eur(c.resale_min)}</div></div>
-        <div><span class="eyebrow">Médiane</span><div class="num">${eur(c.resale_median)}</div></div>
-        <div><span class="eyebrow">P75</span><div class="num">${eur(c.resale_max)}</div></div></div>` : ""}
+    <div class="f3">
+      <div><span class="eyebrow">P25</span><div class="num">${c.resale_min!=null?eur(c.resale_min):"—"}</div></div>
+      <div><span class="eyebrow">Médiane</span><div class="num">${c.resale_median!=null?eur(c.resale_median):"—"}</div></div>
+      <div><span class="eyebrow">P75</span><div class="num">${c.resale_max!=null?eur(c.resale_max):"—"}</div></div>
+    </div>
+    <div class="stat" style="margin-top:8px"><span class="eyebrow">Achat max prudent</span><div class="v">${c.buy_max_computed!=null?eur(c.buy_max_computed):"—"}</div></div>
+    <hr class="sep">
+    <span class="eyebrow">Prérempli sur les nouvelles lignes (commande/stock)</span>
+    <div class="f2" style="margin-top:8px">
+      <label><span class="lb">Prix de vente visé (€)</span><input id="ce-target" type="number" min="0" step="0.01" value="${c.resale_target_eur??""}"></label>
+      <label><span class="lb">Plateforme par défaut</span><select id="ce-platform">
+        <option value="">—</option>
+        ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${c.default_resale_platform===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" data-save-card-defaults="${c.id}">Enregistrer</button></div>
+    <hr class="sep">
+    <div class="actions" style="justify-content:flex-start">
+      <button class="btn" data-card-to-order="${c.id}">+ Ajouter à une commande</button>
+      <button class="btn" data-card-to-stock="${c.id}">+ Ajouter au stock</button>
+    </div>
     <hr class="sep">
     <span class="eyebrow">Exemplaires liés (${(c.exemplaires||[]).length})</span>
     <div style="margin:8px 0">${rows}</div>
+  `,"center");
+}
+
+/* ---------------- sélecteur de carte (+ dans commande/stock) ---------------- */
+let cardPickerCards = null;   // cache, rechargé à chaque ouverture
+let cardPickerCtx = null;     // {type:"order", orderId} | {type:"stock"}
+let cardPickerCount = 0;
+
+function pickerNorm(s){
+  return (s||"").normalize("NFKD").replace(/[̀-ͯ]/g,"")
+    .toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+}
+
+async function openCardPicker(ctx){
+  cardPickerCtx = ctx;
+  cardPickerCount = 0;
+  cardPickerCards = (await api("/api/cards/picker")).cards;
+  renderCardPicker();
+}
+
+function renderCardPicker(){
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Sélecteur</span>
+      <h2>${cardPickerCount ? `${cardPickerCount} ligne${cardPickerCount>1?"s":""} ajoutée${cardPickerCount>1?"s":""}` : "Choisir une carte"}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <input class="search" id="picker-search" type="search" placeholder="Nom, set, numéro…" autocomplete="off"
+      style="width:100%;margin:0 0 12px" aria-label="Rechercher une carte du référentiel">
+    <div id="picker-results"><p class="note">Tape au moins 2 lettres.</p></div>
+  `,"bottom");
+  const inp = document.getElementById("picker-search");
+  inp.focus();
+  inp.addEventListener("input", ()=> updatePickerResults(inp.value));
+}
+
+function pickerResultRow(c){
+  const range = (c.resale_min!=null||c.resale_median!=null||c.resale_max!=null)
+    ? `${eur(c.resale_min)} / ${eur(c.resale_median)} / ${eur(c.resale_max)}` : "—";
+  const counts = c.counts || {bought:0,in_stock:0,sold:0};
+  return `<button class="card-item" data-picker-pick="${c.id}" style="width:100%;text-align:left">
+    <div class="card-thumb">${c.photo_thumb_url?`<img src="${c.photo_thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover">`:TYPE_EMOJI[c.type]||"🃏"}</div>
+    <div class="card-body">
+      <div class="card-title-row"><span class="card-title">${esc(c.name)}</span></div>
+      <div class="card-sub-row"><span class="dim">${[c.set_name,c.card_number,c.lang,c.grade].filter(Boolean).map(esc).join(" · ")||"—"}</span></div>
+      <div class="dim" style="font-size:12px">Revente P25/méd/P75 : ${range}</div>
+      <div style="font-weight:600;margin-top:2px">Achat max prudent : ${c.buy_max_computed!=null?eur(c.buy_max_computed):"—"}</div>
+      <div class="dim" style="font-size:11px;margin-top:2px">${counts.bought} acheté${counts.bought>1?"s":""} · ${counts.in_stock} en stock · ${counts.sold} vendu${counts.sold>1?"s":""}</div>
+    </div>
+  </button>`;
+}
+
+function updatePickerResults(query){
+  const box = document.getElementById("picker-results");
+  const q = pickerNorm(query);
+  if(q.length<2){ box.innerHTML = `<p class="note">Tape au moins 2 lettres.</p>`; return; }
+  const results = cardPickerCards.filter(c=>{
+    const hay = pickerNorm([c.name,c.set_name,c.card_number].filter(Boolean).join(" "));
+    return hay.includes(q);
+  }).slice(0,30);
+  box.innerHTML = results.map(pickerResultRow).join("") + `
+    <button class="card-item" data-picker-create="${esc(query)}" style="width:100%;text-align:left;cursor:pointer">
+      <div class="card-body"><span class="card-title">＋ Créer « ${esc(query)} » dans le référentiel</span></div>
+    </button>`;
+}
+
+function pickerCreateForm(name){
+  document.getElementById("picker-results").innerHTML = `
+    <p class="note">La photo et les relevés se complètent plus tard, depuis la fiche — juste de quoi identifier la carte.</p>
+    <div class="f2"><label><span class="lb">Nom</span><input id="pcf-name" value="${esc(name)}"></label>
+      <label><span class="lb">Set</span><input id="pcf-set"></label></div>
+    <div class="f3"><label><span class="lb">Numéro</span><input id="pcf-number"></label>
+      <label><span class="lb">Langue</span><input id="pcf-lang" value="FR"></label>
+      <label><span class="lb">Grade</span><input id="pcf-grade" placeholder="PSA 10, raw…"></label></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="btn ghost" data-picker-cancel-create>Retour à la recherche</button>
+      <button class="btn primary" data-picker-confirm-create>Créer et insérer</button>
+    </div>`;
+}
+
+async function pickCard(card){
+  if(cardPickerCtx.type==="order"){
+    await api(`/api/import-orders/${cardPickerCtx.orderId}/lines`,{json:{
+      name:card.name, card_id:card.id, unit_currency:"JPY",
+      resale_target_eur:card.resale_target_eur, resale_platform:card.default_resale_platform,
+    }});
+    await loadCardDeals();
+  } else if(cardPickerCtx.type==="stock"){
+    await api("/api/stock",{json:{
+      name:card.name, set_name:card.set_name, card_number:card.card_number, lang:card.lang||"FR",
+      type:card.type, grade:card.grade, card_id:card.id, cost_basis:0,
+      target_price:card.resale_target_eur, target_platform:card.default_resale_platform,
+    }});
+    await loadStock();
+  }
+  cardPickerCount++;
+  renderCardPicker();
+}
+
+async function cardOrderChooser(card){
+  const openOrders = (cardDeals?.import_orders||[]).filter(o=>o.status!=="recue");
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Ajouter à une commande</span><h2>${esc(card.name)}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div style="margin:8px 0">${openOrders.length ? openOrders.map(o=>`
+      <div class="comp" style="cursor:pointer" data-choose-order="${o.id}" data-card="${card.id}"><span>${esc(o.name||"Commande")}</span>
+        <span class="dim">${({brouillon:"Brouillon",commandee:"Commandée"})[o.status]}</span></div>`).join("")
+      : `<p class="note">Aucune commande en cours (ni brouillon ni commandée).</p>`}</div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn primary" data-choose-order="new" data-card="${card.id}">+ Nouvelle commande</button></div>
   `,"center");
 }
 
@@ -1671,7 +1815,18 @@ document.addEventListener("click", async ev=>{
     if(act==="import"){ closeSheet(); return document.getElementById("file").click(); }
 
     if(act==="logout"){ await api("/api/logout",{method:"POST"}); return location.reload(); }
-    if(t.closest("[data-close-btn]") || t.hasAttribute("data-close")) return closeSheet();
+    if(t.closest("[data-close-btn]") || t.hasAttribute("data-close")){
+      // Fermer le sélecteur : on rouvre la commande derrière pour voir les
+      // lignes ajoutées en rafale (le sélecteur remplace #overlay, il ne
+      // s'empile pas dessus). Rien de spécial côté stock : la liste est déjà
+      // à jour à chaque insertion.
+      if(cardPickerCtx){
+        const ctx = cardPickerCtx; cardPickerCtx = null;
+        if(ctx.type==="order"){ await loadCardDeals(); return importOrderSheet(ctx.orderId); }
+        closeSheet(); return renderRows();
+      }
+      return closeSheet();
+    }
 
     const open = t.closest("[data-open]");
     if(open) return itemSheet(open.dataset.open);
@@ -1812,6 +1967,81 @@ document.addEventListener("click", async ev=>{
       return cardMergeScreen();
     }
 
+    const scd = t.closest("[data-save-card-defaults]");
+    if(scd){
+      const cid = scd.dataset.saveCardDefaults;
+      const c = await api("/api/cards/"+cid);
+      const body = {...c, resale_target_eur: document.getElementById("ce-target").value||null,
+                    default_resale_platform: document.getElementById("ce-platform").value||null};
+      await api("/api/cards/"+cid, {method:"PUT", json:body});
+      return cardEntrySheet(cid);
+    }
+    const cto = t.closest("[data-card-to-order]");
+    if(cto) return cardOrderChooser(await api("/api/cards/"+cto.dataset.cardToOrder));
+    const cts = t.closest("[data-card-to-stock]");
+    if(cts){
+      const c = await api("/api/cards/"+cts.dataset.cardToStock);
+      const r = await api("/api/stock",{json:{
+        name:c.name, set_name:c.set_name, card_number:c.card_number, lang:c.lang||"FR",
+        type:c.type, grade:c.grade, card_id:c.id, cost_basis:0,
+        target_price:c.resale_target_eur, target_platform:c.default_resale_platform,
+      }});
+      await loadStock();
+      return stockSheet(r.id);
+    }
+    const cho = t.closest("[data-choose-order]");
+    if(cho){
+      const c = await api("/api/cards/"+cho.dataset.card);
+      let oid = cho.dataset.chooseOrder;
+      if(oid==="new") oid = (await api("/api/import-orders",{json:{name:c.name}})).id;
+      await api(`/api/import-orders/${oid}/lines`,{json:{
+        name:c.name, card_id:c.id, unit_currency:"JPY",
+        resale_target_eur:c.resale_target_eur, resale_platform:c.default_resale_platform,
+      }});
+      await loadCardDeals();
+      return importOrderSheet(oid);
+    }
+
+    // --- sélecteur de carte (+ dans commande/stock) ---
+    const ocp = t.closest("[data-open-card-picker]");
+    if(ocp){
+      const ctx = ocp.dataset.pickerOrder ? {type:"order", orderId:ocp.dataset.pickerOrder} : {type:"stock"};
+      return openCardPicker(ctx);
+    }
+    const pp = t.closest("[data-picker-pick]");
+    if(pp) return pickCard(cardPickerCards.find(c=>c.id===pp.dataset.pickerPick));
+    const pcr = t.closest("[data-picker-create]");
+    if(pcr) return pickerCreateForm(pcr.dataset.pickerCreate);
+    if(t.closest("[data-picker-cancel-create]"))
+      return updatePickerResults(document.getElementById("picker-search")?.value||"");
+    if(t.closest("[data-picker-confirm-create]")){
+      const g = x => document.getElementById(x).value.trim();
+      const name = g("pcf-name");
+      if(!name) return document.getElementById("pcf-name").focus();
+      const card = await api("/api/cards",{json:{
+        name, set_name:g("pcf-set"), card_number:g("pcf-number"), lang:g("pcf-lang")||"FR", grade:g("pcf-grade"),
+      }});
+      cardPickerCards.push(card);
+      return pickCard(card);
+    }
+    const rrt = t.closest("[data-reset-line-resale]");
+    if(rrt){
+      await api(`/api/import-order-lines/${rrt.dataset.resetLineResale}/reset-resale-target`,{method:"PUT"});
+      await loadCardDeals(); return importOrderSheet(openOrderId);
+    }
+    const rst = t.closest("[data-reset-stock-target]");
+    if(rst){
+      await api(`/api/stock/${rst.dataset.resetStockTarget}/reset-target`,{method:"PUT"});
+      await loadStock(); return stockSheet(rst.dataset.resetStockTarget);
+    }
+    const dup = t.closest("[data-dup-stock]");
+    if(dup){
+      const n = parseInt(prompt("Dupliquer en combien d'exemplaires supplémentaires ?","1")||"0",10);
+      if(!n || n<1) return;
+      await api(`/api/stock/${dup.dataset.dupStock}/duplicate`,{method:"POST",json:{n}});
+      await loadStock(); return renderRows();
+    }
+
     const os = t.closest("[data-open-sheet]"); if(os) return cardSheetSheet(os.dataset.openSheet);
     const oo = t.closest("[data-open-order]"); if(oo) return importOrderSheet(oo.dataset.openOrder);
 
@@ -1949,7 +2179,7 @@ document.addEventListener("click", async ev=>{
       const currency = document.getElementById("ole-currency-"+lid).value;
       const amount = document.getElementById("ole-amount-"+lid).value;
       const body = {
-        name:line.name, type:line.type, qty:line.qty, unit_currency:currency,
+        name:line.name, type:line.type, qty:line.qty, unit_currency:currency, card_id:line.card_id,
         resale_target_eur:document.getElementById("ole-resale-"+lid).value||null,
         resale_platform:document.getElementById("ole-platform-"+lid).value||null,
       };
@@ -2009,14 +2239,15 @@ document.addEventListener("click", async ev=>{
     const svst = t.closest("[data-save-stock]");
     if(svst){
       const g = x => document.getElementById(x).value.trim();
+      const id = svst.dataset.saveStock;
+      const current = id ? stockData.stock.find(x=>x.id===id) : null;
       const body = {
         name:g("st-name"), set_name:g("st-set"), card_number:g("st-number"), lang:g("st-lang"),
         type:g("st-type"), grade:g("st-grade"), cost_basis:g("st-cost")||0, buy_date:g("st-buydate"),
         buy_platform:g("st-buyplatform"), buy_url:g("st-buyurl"), target_price:g("st-target")||null,
-        target_platform:g("st-targetplatform")||null, notes:g("st-notes"),
+        target_platform:g("st-targetplatform")||null, notes:g("st-notes"), card_id:current?.card_id||null,
       };
       if(!body.name) return document.getElementById("st-name").focus();
-      const id = svst.dataset.saveStock;
       if(id){
         await api("/api/stock/"+id, {json:body, method:"PUT"});
         await loadStock(); return stockSheet(id);
