@@ -1550,6 +1550,7 @@ async function cardEntrySheet(cardId){
           <span class="dim" style="font-size:13px">${[c.set_name,c.card_number,c.lang,c.grade].filter(Boolean).map(esc).join(" · ")}</span></div>
       </div>
       <button class="btn ghost" data-close-btn>Fermer</button></div>
+    ${c.importable_sheet_photo ? `<p class="note">Une fiche carte liée a déjà une photo. <button class="tag t-loose" data-import-sheet-photo="${c.id}" style="cursor:pointer">Reprendre cette photo</button></p>` : ""}
     <div class="f3">
       <div><span class="eyebrow">P25</span><div class="num">${c.resale_min!=null?eur(c.resale_min):"—"}</div></div>
       <div><span class="eyebrow">Médiane</span><div class="num">${c.resale_median!=null?eur(c.resale_median):"—"}</div></div>
@@ -2134,6 +2135,11 @@ document.addEventListener("click", async ev=>{
       if(!confirm("Supprimer cette photo ?")) return;
       await api(`/api/cards/${dcp.dataset.delCardPhoto}/photo`,{method:"DELETE"});
       await Promise.all([loadCardDeals(), loadStock()]); return cardEntrySheet(dcp.dataset.delCardPhoto);
+    }
+    const isp = t.closest("[data-import-sheet-photo]");
+    if(isp){
+      await api(`/api/cards/${isp.dataset.importSheetPhoto}/photo/import-from-sheet`,{method:"POST"});
+      await Promise.all([loadCardDeals(), loadStock()]); return cardEntrySheet(isp.dataset.importSheetPhoto);
     }
 
     // --- Achat-revente : commandes d'import Japon ---

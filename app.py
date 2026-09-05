@@ -2531,6 +2531,24 @@ def api_pick_a_card(budget: float | None = None):
 
 # --------------------------------------------------------- référentiel de cartes
 
+def _copy_sheet_photo_to_card(sheet_id: str, sheet_photo_id: str, card_id: str) -> str | None:
+    """Copie les deux fichiers déjà traités (original + vignette) d'une fiche
+    carte vers le dossier de la carte du référentiel — pas un nouvel upload,
+    juste un changement d'emplacement, avec un nouvel id de fichier pour ne
+    jamais partager un id entre deux entités. Renvoie le nouveau photo_id, ou
+    None si les fichiers sources sont introuvables."""
+    orig = media_mod.photo_path(CARD_SHEET_MEDIA, sheet_id, sheet_photo_id, thumb=False)
+    thumb = media_mod.photo_path(CARD_SHEET_MEDIA, sheet_id, sheet_photo_id, thumb=True)
+    if not orig or not thumb:
+        return None
+    new_id = secrets.token_hex(8)
+    dest = CARD_MEDIA / card_id
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / f"{new_id}.webp").write_bytes(orig.read_bytes())
+    (dest / f"{new_id}.thumb.webp").write_bytes(thumb.read_bytes())
+    return new_id
+
+
 CARD_FIELDS = ["name", "set_name", "card_number", "lang", "type", "grade", "profit_target_pct",
                "resale_mode", "resale_min", "resale_median", "resale_max", "buy_max_computed",
                "resale_target_eur", "default_resale_platform", "notes"]
@@ -2621,6 +2639,7 @@ def _card_view(row: dict) -> dict:
     d = dict(row)
     d.update(_card_photo_urls(d))
     exemplaires = []
+    importable_sheet_photo = None
     with db() as con:
         for table, status_field in (("items", "status"), ("card_sheets", "status"),
                                      ("import_order_lines", None), ("stock_items", "status")):
@@ -2628,7 +2647,13 @@ def _card_view(row: dict) -> dict:
                 rd = dict(r)
                 exemplaires.append({"table": table, "id": rd["id"], "label": rd.get("name"),
                                      "status": rd.get(status_field) if status_field else None})
+                # Cartes migrées avant que l'upload direct sur la carte n'existe :
+                # la fiche liée avait déjà une photo, jamais recopiée. Propose
+                # de la reprendre plutôt que de forcer un nouvel upload.
+                if table == "card_sheets" and rd.get("photo_id") and not d.get("photo_id") and importable_sheet_photo is None:
+                    importable_sheet_photo = rd["id"]
     d["exemplaires"] = exemplaires
+    d["importable_sheet_photo"] = importable_sheet_photo
     return d
 
 
@@ -2751,16 +2776,27 @@ def api_cards_migration_run():
                 buy_max = prudent["c_max"] if prudent else None
             except Exception:
                 buy_max = None
+            # La fiche carte est la source de vérité : si elle a déjà une
+            # photo, la carte nouvellement créée en hérite tout de suite —
+            # pas de fenêtre où le référentiel serait sans photo alors
+            # qu'une fiche liée en avait une.
+            photo_id = photo_size = photo_w = photo_h = None
+            if s.get("photo_id"):
+                photo_id = _copy_sheet_photo_to_card(s["id"], s["photo_id"], cid)
+                if photo_id:
+                    photo_size, photo_w, photo_h = s.get("photo_size_bytes"), s.get("photo_width"), s.get("photo_height")
             con.execute(
                 "INSERT INTO cards(id,name,set_name,card_number,lang,type,grade,identity_key,"
                 "profit_target_pct,resale_mode,resale_min,resale_median,resale_max,buy_max_computed,"
-                "resale_target_eur,default_resale_platform,notes,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "resale_target_eur,default_resale_platform,photo_id,photo_size_bytes,photo_width,photo_height,"
+                "notes,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (cid, f["name"], f["set_name"], f["card_number"], f["lang"], f["type"], f["grade"],
                  cards_mod.identity_key(f["name"], f["set_name"], f["card_number"], f["lang"], f["grade"]),
                  s.get("profit_target_pct"), s.get("resale_mode") or "auto",
                  s.get("resale_min"), s.get("resale_median"), s.get("resale_max"), buy_max,
                  s.get("resale_median"), s.get("resale_platform"),
+                 photo_id, photo_size, photo_w, photo_h,
                  s.get("notes") or "", now),
             )
             con.execute("UPDATE card_sheets SET card_id=? WHERE id=?", (cid, s["id"]))
@@ -2945,6 +2981,36 @@ async def api_add_card_photo(cid: str, file: UploadFile = File(...)):
     if old_photo_id:
         media_mod.delete_photo(CARD_MEDIA, cid, old_photo_id)
     return {"id": info["id"], "url": f"/api/cards/{cid}/photo", "thumb_url": f"/api/cards/{cid}/photo/thumb"}
+
+
+@app.post("/api/cards/{cid}/photo/import-from-sheet")
+def api_import_card_photo_from_sheet(cid: str):
+    """Reprend la photo d'une fiche carte déjà liée, pour les cartes migrées
+    avant que l'upload direct sur la carte n'existe (la fiche avait une
+    photo, jamais recopiée vers le référentiel). Simple copie de fichiers
+    déjà traités, pas un nouvel upload."""
+    with db() as con:
+        card = con.execute("SELECT photo_id FROM cards WHERE id=?", (cid,)).fetchone()
+        if not card:
+            raise HTTPException(404, "carte introuvable")
+        if card["photo_id"]:
+            raise HTTPException(400, "cette carte a déjà une photo")
+        sheet = con.execute(
+            "SELECT id, photo_id, photo_size_bytes, photo_width, photo_height FROM card_sheets "
+            "WHERE card_id=? AND photo_id IS NOT NULL LIMIT 1", (cid,)
+        ).fetchone()
+        if not sheet:
+            raise HTTPException(400, "aucune fiche liée n'a de photo à reprendre")
+        sheet = dict(sheet)
+    new_id = _copy_sheet_photo_to_card(sheet["id"], sheet["photo_id"], cid)
+    if not new_id:
+        raise HTTPException(400, "fichier de la photo introuvable")
+    with db() as con:
+        con.execute(
+            "UPDATE cards SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? WHERE id=?",
+            (new_id, sheet["photo_size_bytes"], sheet["photo_width"], sheet["photo_height"], cid),
+        )
+    return {"id": new_id, "url": f"/api/cards/{cid}/photo", "thumb_url": f"/api/cards/{cid}/photo/thumb"}
 
 
 @app.delete("/api/cards/{cid}/photo")
