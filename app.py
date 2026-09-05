@@ -351,6 +351,9 @@ def migrate(con: sqlite3.Connection) -> None:
             # jamais recalculé au taux de change (ce n'est pas une estimation).
             "unit_price_eur": "REAL",
             "card_id": "TEXT REFERENCES cards(id)",
+            # Même logique que stock_items.target_overridden, appliquée à
+            # resale_target_eur/resale_platform.
+            "resale_target_overridden": "INTEGER NOT NULL DEFAULT 0",
         },
         "import_orders": {
             # Montant réellement débité en € pour la part ¥ de la commande,
@@ -389,7 +392,22 @@ def migrate(con: sqlite3.Connection) -> None:
             # s'appuyer dessus. Vide par défaut sur les fiches existantes.
             "card_number": "TEXT DEFAULT ''",
         },
-        "stock_items": {"card_id": "TEXT REFERENCES cards(id)"},
+        "stock_items": {
+            "card_id": "TEXT REFERENCES cards(id)",
+            # Passe à 1 quand target_price/target_platform diverge de la valeur
+            # par défaut de la carte liée (cards.resale_target_eur / .default_
+            # resale_platform) — calculé côté serveur à chaque écriture, jamais
+            # saisi tel quel par le client. Porte le repère visuel "modifié".
+            "target_overridden": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "cards": {
+            # Prix de vente visé par défaut de la carte (distinct de resale_
+            # median, qui est une statistique marché) : propagé aux nouvelles
+            # lignes de commande/stock créées via le sélecteur, éditable sur
+            # la fiche. Idem pour la plateforme de revente par défaut.
+            "resale_target_eur": "REAL",
+            "default_resale_platform": "TEXT",
+        },
     }
     for table, cols in add.items():
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -1445,6 +1463,9 @@ def api_list_card_deals():
         lines_all = [dict(r) for r in con.execute(
             "SELECT * FROM import_order_lines ORDER BY order_id, sort_order"
         )]
+        cards_by_id = {r["id"]: dict(r) for r in con.execute(
+            "SELECT id,name,set_name,card_number,lang,grade,type,photo_id,buy_max_computed FROM cards"
+        )}
     lines_by_order: dict[str, list] = {}
     for l in lines_all:
         lines_by_order.setdefault(l["order_id"], []).append(l)
@@ -1455,6 +1476,29 @@ def api_list_card_deals():
         computed = card_deals_mod.build_import_order_view(o, lines, cs, fx_rate)
         ov = dict(o)
         ov["lines"] = computed.pop("lines")
+        # Les lignes de commande n'ont pas leurs propres colonnes set/numéro/
+        # langue/grade (saisie volontairement pauvre, cf. _identity_fields_
+        # order_line) : la carte liée est la seule source de cette identité
+        # riche, jointe ici pour l'affichage plutôt que dupliquée en base.
+        for row in ov["lines"]:
+            c = cards_by_id.get(row.get("card_id"))
+            row["card_snapshot"] = None if not c else {
+                "id": c["id"], "name": c["name"], "set_name": c["set_name"], "card_number": c["card_number"],
+                "lang": c["lang"], "grade": c["grade"], "type": c["type"],
+                "buy_max_computed": c["buy_max_computed"],
+                **_card_photo_urls(c),
+            }
+            # Alerte de dépassement : jamais bloquante, juste visible tout de
+            # suite sur la ligne (montant en rouge côté frontend) plutôt qu'à
+            # la réception du colis. Comparé au coût tout compris (landed,
+            # taxes/frais inclus) — pas au prix article brut — puisque
+            # buy_max_computed est lui-même un prix "tout compris" prudent.
+            bm = c.get("buy_max_computed") if c else None
+            unit_eur = row.get("unit_landed_cost")
+            over = round(unit_eur - bm, 2) if (bm is not None and unit_eur) else None
+            row["buy_over_max_eur"] = over if (over is not None and over > 0) else None
+            row["buy_over_max_pct"] = round(over / bm * 100, 1) if (row["buy_over_max_eur"] and bm) else None
+        computed["n_over_max"] = sum(1 for row in ov["lines"] if row.get("buy_over_max_eur"))
         ov["computed"] = computed
         order_views.append(ov)
     return {"card_sheets": sheet_views, "import_orders": order_views, "settings": cs, "fx_rate": fx_rate}
@@ -1833,6 +1877,7 @@ def clean_order_line(p: dict) -> dict:
         "unit_price_eur": (max(0.0, float(p["unit_price_eur"])) if p.get("unit_price_eur") not in (None, "") else None),
         "resale_target_eur": (float(p["resale_target_eur"]) if p.get("resale_target_eur") not in (None, "") else None),
         "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else None,
+        "card_id": (str(p["card_id"]) if p.get("card_id") else None),
     }
 
 
@@ -1848,12 +1893,15 @@ def api_add_order_line(oid: str, p: dict = Body(...)):
         maxo = con.execute(
             "SELECT COALESCE(MAX(sort_order), -1) AS m FROM import_order_lines WHERE order_id=?", (oid,)
         ).fetchone()["m"]
+        overridden = _resale_overridden(con, d["card_id"], d["resale_target_eur"], d["resale_platform"])
         con.execute(
             "INSERT INTO import_order_lines(id,order_id,item_id,name,type,qty,unit_currency,"
-            "unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order,card_id,"
+            "resale_target_overridden)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (lid, oid, d["item_id"], d["name"], d["type"], d["qty"], d["unit_currency"],
-             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"], maxo + 1),
+             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"], maxo + 1,
+             d["card_id"], overridden),
         )
     return {"id": lid}
 
@@ -1862,14 +1910,37 @@ def api_add_order_line(oid: str, p: dict = Body(...)):
 def api_edit_order_line(lid: str, p: dict = Body(...)):
     d = clean_order_line(p)
     with db() as con:
+        overridden = _resale_overridden(con, d["card_id"], d["resale_target_eur"], d["resale_platform"])
         cur = con.execute(
             "UPDATE import_order_lines SET item_id=?,name=?,type=?,qty=?,unit_currency=?,"
-            "unit_price_jpy=?,unit_price_eur=?,resale_target_eur=?,resale_platform=? WHERE id=?",
+            "unit_price_jpy=?,unit_price_eur=?,resale_target_eur=?,resale_platform=?,card_id=?,"
+            "resale_target_overridden=? WHERE id=?",
             (d["item_id"], d["name"], d["type"], d["qty"], d["unit_currency"],
-             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"], lid),
+             d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"],
+             d["card_id"], overridden, lid),
         )
         if not cur.rowcount:
             raise HTTPException(404, "ligne introuvable")
+    return {"ok": True}
+
+
+@app.put("/api/import-order-lines/{lid}/reset-resale-target")
+def api_reset_order_line_resale_target(lid: str):
+    """« Revenir à la valeur de la fiche » : réaligne la ligne sur la valeur
+    actuelle de la carte liée et efface le repère de surcharge."""
+    with db() as con:
+        row = con.execute("SELECT card_id FROM import_order_lines WHERE id=?", (lid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        if not row["card_id"]:
+            raise HTTPException(400, "ligne non liée à une carte du référentiel")
+        card = con.execute("SELECT resale_target_eur, default_resale_platform FROM cards WHERE id=?",
+                            (row["card_id"],)).fetchone()
+        con.execute(
+            "UPDATE import_order_lines SET resale_target_eur=?, resale_platform=?, resale_target_overridden=0 "
+            "WHERE id=?",
+            (card["resale_target_eur"] if card else None, card["default_resale_platform"] if card else None, lid),
+        )
     return {"ok": True}
 
 
@@ -1921,7 +1992,8 @@ def api_realize_order_line(lid: str, p: dict = Body(...)):
 
 STOCK_FIELDS = ["linked_item_id", "name", "set_name", "card_number", "lang", "type", "grade",
                 "cost_basis", "buy_date", "buy_platform", "buy_url",
-                "target_price", "target_platform", "notes", "source_order_line_id"]
+                "target_price", "target_platform", "notes", "source_order_line_id",
+                "card_id", "target_overridden"]
 
 
 def clean_stock_item(p: dict) -> dict:
@@ -1944,6 +2016,10 @@ def clean_stock_item(p: dict) -> dict:
         "target_platform": p.get("target_platform") if p.get("target_platform") in card_deals_mod.SELL_PLATFORMS else None,
         "notes": str(p.get("notes", ""))[:2000],
         "source_order_line_id": (str(p["source_order_line_id"]) if p.get("source_order_line_id") else None),
+        "card_id": (str(p["card_id"]) if p.get("card_id") else None),
+        # Recalculé côté serveur juste avant l'écriture (cf. _resale_overridden) ;
+        # 0 par défaut ici, jamais pris tel quel depuis le client.
+        "target_overridden": 0,
     }
 
 
@@ -1953,7 +2029,7 @@ def _stock_photo_urls(row: dict) -> dict:
     return {"photo_url": None, "photo_thumb_url": None}
 
 
-def _stock_view(row: dict, events: list[dict]) -> dict:
+def _stock_view(row: dict, events: list[dict], cards_by_id: dict | None = None) -> dict:
     d = dict(row)
     delays = stock_mod.compute_delays(events)
     d["delays"] = {"import_days": delays["import_days"], "listing_days": delays["listing_days"],
@@ -1965,6 +2041,14 @@ def _stock_view(row: dict, events: list[dict]) -> dict:
     cb = d.get("cost_basis")
     d["expected_margin_pct"] = (round((d["target_price"] - cb) / cb * 100, 1)
                                  if d.get("target_price") and cb else None)
+    # Alerte de dépassement : le prix d'achat réel comparé au prix max prudent
+    # de la carte liée. Jamais bloquant — juste visible avant que ça devienne
+    # une découverte à la réception du colis.
+    card = (cards_by_id or {}).get(d.get("card_id"))
+    bm = card.get("buy_max_computed") if card else None
+    over = round(cb - bm, 2) if (bm is not None and cb) else None
+    d["buy_over_max_eur"] = over if (over is not None and over > 0) else None
+    d["buy_over_max_pct"] = round(over / bm * 100, 1) if (d["buy_over_max_eur"] and bm) else None
     return d
 
 
@@ -1973,12 +2057,14 @@ def api_list_stock():
     with db() as con:
         rows = [dict(r) for r in con.execute("SELECT * FROM stock_items ORDER BY created_at DESC")]
         all_events = [dict(r) for r in con.execute("SELECT * FROM stock_events ORDER BY at")]
+        cards_by_id = {r["id"]: dict(r) for r in con.execute("SELECT id, buy_max_computed FROM cards")}
     events_by_stock: dict[str, list] = {}
     for e in all_events:
         events_by_stock.setdefault(e["stock_id"], []).append(e)
-    views = [_stock_view(r, events_by_stock.get(r["id"], [])) for r in rows]
+    views = [_stock_view(r, events_by_stock.get(r["id"], []), cards_by_id) for r in rows]
     kpis = stock_mod.build_kpis(rows, events_by_stock)
-    return {"stock": views, "kpis": kpis}
+    n_over_max = sum(1 for v in views if v.get("buy_over_max_eur"))
+    return {"stock": views, "kpis": kpis, "n_over_max": n_over_max}
 
 
 @app.post("/api/stock")
@@ -2002,6 +2088,7 @@ def api_add_stock(p: dict = Body(...)):
                  1, 0.0, d["buy_date"], "", "watch", 0.0, now),
             )
             d["linked_item_id"] = iid
+        d["target_overridden"] = _resale_overridden(con, d["card_id"], d["target_price"], d["target_platform"])
         con.execute(
             f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
             f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
@@ -2018,6 +2105,7 @@ def api_edit_stock(sid: str, p: dict = Body(...)):
     if not d["name"]:
         raise HTTPException(400, "nom manquant")
     with db() as con:
+        d["target_overridden"] = _resale_overridden(con, d["card_id"], d["target_price"], d["target_platform"])
         cur = con.execute(
             f"UPDATE stock_items SET {','.join(f + '=?' for f in STOCK_FIELDS)} WHERE id=?",
             (*[d[f] for f in STOCK_FIELDS], sid),
@@ -2025,6 +2113,50 @@ def api_edit_stock(sid: str, p: dict = Body(...)):
         if not cur.rowcount:
             raise HTTPException(404, "ligne introuvable")
     return {"ok": True}
+
+
+@app.put("/api/stock/{sid}/reset-target")
+def api_reset_stock_target(sid: str):
+    """« Revenir à la valeur de la fiche » côté stock."""
+    with db() as con:
+        row = con.execute("SELECT card_id FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        if not row["card_id"]:
+            raise HTTPException(400, "ligne non liée à une carte du référentiel")
+        card = con.execute("SELECT resale_target_eur, default_resale_platform FROM cards WHERE id=?",
+                            (row["card_id"],)).fetchone()
+        con.execute(
+            "UPDATE stock_items SET target_price=?, target_platform=?, target_overridden=0 WHERE id=?",
+            (card["resale_target_eur"] if card else None, card["default_resale_platform"] if card else None, sid),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/stock/{sid}/duplicate")
+def api_duplicate_stock(sid: str, p: dict = Body(...)):
+    """« Dupliquer ×N » : N nouveaux exemplaires indépendants (même carte,
+    même prix d'achat de départ), chacun avec son propre id — jamais une
+    quantité sur une seule ligne (cf. le principe du module stock)."""
+    n = max(1, min(20, int(p.get("n") or 1)))
+    with db() as con:
+        row = con.execute("SELECT * FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        d = dict(row)
+        now = datetime.now().isoformat(timespec="seconds")
+        new_ids = []
+        for _ in range(n):
+            new_id = nid()
+            con.execute(
+                f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
+                (new_id, *[d[f] for f in STOCK_FIELDS], "achete", now),
+            )
+            con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                        (nid(), new_id, None, "achete", d.get("buy_date") or date.today().isoformat()))
+            new_ids.append(new_id)
+    return {"ids": new_ids}
 
 
 @app.delete("/api/stock/{sid}")
@@ -2174,6 +2306,7 @@ def api_transfer_item_to_stock(iid: str):
         "buy_date": it["buy_date"] or date.today().isoformat(),
         "buy_platform": "", "buy_url": "", "target_price": None, "target_platform": None,
         "notes": "", "source_order_line_id": None,
+        "card_id": it.get("card_id"), "target_overridden": 0,
     }
     sid = nid()
     now = datetime.now().isoformat(timespec="seconds")
@@ -2323,7 +2456,8 @@ def api_pick_a_card(budget: float | None = None):
 # --------------------------------------------------------- référentiel de cartes
 
 CARD_FIELDS = ["name", "set_name", "card_number", "lang", "type", "grade", "profit_target_pct",
-               "resale_mode", "resale_min", "resale_median", "resale_max", "buy_max_computed", "notes"]
+               "resale_mode", "resale_min", "resale_median", "resale_max", "buy_max_computed",
+               "resale_target_eur", "default_resale_platform", "notes"]
 CARD_REF_TABLES = ["items", "card_sheets", "import_order_lines", "stock_items", "card_listings"]
 
 
@@ -2342,8 +2476,23 @@ def clean_card(p: dict) -> dict:
         "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
         "resale_min": numopt("resale_min"), "resale_median": numopt("resale_median"), "resale_max": numopt("resale_max"),
         "buy_max_computed": numopt("buy_max_computed"),
+        "resale_target_eur": numopt("resale_target_eur"),
+        "default_resale_platform": (p.get("default_resale_platform")
+                                     if p.get("default_resale_platform") in card_deals_mod.SELL_PLATFORMS else None),
         "notes": str(p.get("notes", ""))[:2000],
     }
+
+
+def _resale_overridden(con: sqlite3.Connection, card_id: str | None, target, platform) -> int:
+    """1 si (target, platform) diverge de la valeur par défaut de la carte
+    liée — jamais saisi par le client, toujours recalculé côté serveur au
+    moment de l'écriture. Sans carte liée, la question n'a pas de sens (0)."""
+    if not card_id:
+        return 0
+    row = con.execute("SELECT resale_target_eur, default_resale_platform FROM cards WHERE id=?", (card_id,)).fetchone()
+    if not row:
+        return 0
+    return int((target != row["resale_target_eur"]) or (platform != row["default_resale_platform"]))
 
 
 def _identity_fields_items(row: dict) -> dict:
@@ -2413,6 +2562,64 @@ def api_list_cards():
     return {"cards": [_card_view(r) for r in rows]}
 
 
+@app.post("/api/cards")
+def api_add_card(p: dict = Body(...)):
+    """Création manuelle, depuis le sélecteur ("créer cette carte") quand
+    aucune entrée du référentiel ne correspond — sans quitter l'écran de
+    saisie. La photo et les relevés viendront plus tard, depuis la fiche."""
+    d = clean_card(p)
+    if not d["name"]:
+        raise HTTPException(400, "nom manquant")
+    cid = nid()
+    ik = cards_mod.identity_key(d["name"], d["set_name"], d["card_number"], d["lang"], d["grade"])
+    with db() as con:
+        con.execute(
+            f"INSERT INTO cards(id,{','.join(CARD_FIELDS)},identity_key,created_at) "
+            f"VALUES(?,{','.join('?' * len(CARD_FIELDS))},?,?)",
+            (cid, *[d[f] for f in CARD_FIELDS], ik, datetime.now().isoformat(timespec="seconds")),
+        )
+    return _card_picker_entry(d | {"id": cid, "photo_id": None})
+
+
+def _card_picker_entry(c: dict, counts: dict | None = None) -> dict:
+    return {
+        "id": c["id"], "name": c["name"], "set_name": c.get("set_name") or "",
+        "card_number": c.get("card_number") or "", "lang": c.get("lang") or "",
+        "type": c.get("type") or "loose", "grade": c.get("grade") or "",
+        "resale_min": c.get("resale_min"), "resale_median": c.get("resale_median"), "resale_max": c.get("resale_max"),
+        "buy_max_computed": c.get("buy_max_computed"),
+        "resale_target_eur": c.get("resale_target_eur"), "default_resale_platform": c.get("default_resale_platform"),
+        **_card_photo_urls(c),
+        "counts": counts or {"bought": 0, "in_stock": 0, "sold": 0},
+    }
+
+
+@app.get("/api/cards/picker")
+def api_cards_picker():
+    """Liste compacte pour le sélecteur (bouton + des commandes/du stock) :
+    pas les exemplaires complets de l'écran de fusion, juste de quoi
+    chercher, comparer et décider un prix d'achat en un coup d'œil. Chargée
+    une fois à l'ouverture, filtrée côté client ensuite (collection perso :
+    quelques centaines de cartes au plus, aucune latence perceptible)."""
+    with db() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM cards WHERE merged_into_id IS NULL ORDER BY name"
+        )]
+        stock_rows = con.execute(
+            "SELECT card_id, status, COUNT(*) AS n FROM stock_items "
+            "WHERE card_id IS NOT NULL GROUP BY card_id, status"
+        ).fetchall()
+    counts_by_card: dict[str, dict] = {}
+    for r in stock_rows:
+        c = counts_by_card.setdefault(r["card_id"], {"bought": 0, "in_stock": 0, "sold": 0})
+        c["bought"] += r["n"]
+        if r["status"] == "vendu":
+            c["sold"] += r["n"]
+        elif r["status"] in stock_mod.ACTIVE_STATUSES:
+            c["in_stock"] += r["n"]
+    return {"cards": [_card_picker_entry(r, counts_by_card.get(r["id"])) for r in rows]}
+
+
 # --- migration : simulation puis exécution ---
 
 def _build_migration_inputs():
@@ -2467,12 +2674,14 @@ def api_cards_migration_run():
                 buy_max = None
             con.execute(
                 "INSERT INTO cards(id,name,set_name,card_number,lang,type,grade,identity_key,"
-                "profit_target_pct,resale_mode,resale_min,resale_median,resale_max,buy_max_computed,notes,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "profit_target_pct,resale_mode,resale_min,resale_median,resale_max,buy_max_computed,"
+                "resale_target_eur,default_resale_platform,notes,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (cid, f["name"], f["set_name"], f["card_number"], f["lang"], f["type"], f["grade"],
                  cards_mod.identity_key(f["name"], f["set_name"], f["card_number"], f["lang"], f["grade"]),
                  s.get("profit_target_pct"), s.get("resale_mode") or "auto",
                  s.get("resale_min"), s.get("resale_median"), s.get("resale_max"), buy_max,
+                 s.get("resale_median"), s.get("resale_platform"),
                  s.get("notes") or "", now),
             )
             con.execute("UPDATE card_sheets SET card_id=? WHERE id=?", (cid, s["id"]))
@@ -3085,16 +3294,20 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                 lnd = clean_order_line(ln)
                 con.execute(
                     "INSERT OR REPLACE INTO import_order_lines(id,order_id,item_id,name,type,qty,"
-                    "unit_currency,unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order,card_id) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "unit_currency,unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order,"
+                    "card_id,resale_target_overridden) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (str(ln.get("id") or nid()), oid, lnd["item_id"], lnd["name"], lnd["type"], lnd["qty"],
                      lnd["unit_currency"], lnd["unit_price_jpy"], lnd["unit_price_eur"],
                      lnd["resale_target_eur"], lnd["resale_platform"],
-                     int(ln.get("sort_order") if ln.get("sort_order") is not None else i), ln.get("card_id")),
+                     int(ln.get("sort_order") if ln.get("sort_order") is not None else i),
+                     ln.get("card_id"), int(bool(ln.get("resale_target_overridden")))),
                 )
         for si in data.get("stock_items") or []:
             stid = str(si.get("id") or nid())
             sd = clean_stock_item(si)
+            sd["card_id"] = si.get("card_id")
+            sd["target_overridden"] = int(bool(si.get("target_overridden")))
             photo_id = photo_size = photo_w = photo_h = None
             src_photo_id = si.get("photo_id")
             if src_photo_id:
@@ -3113,13 +3326,13 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute(
                 f"INSERT OR REPLACE INTO stock_items(id,{','.join(STOCK_FIELDS)},"
                 "photo_id,photo_size_bytes,photo_width,photo_height,status,"
-                "sale_price,sale_platform,sale_net,sale_net_manual,card_id,created_at) "
-                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?,?)",
+                "sale_price,sale_platform,sale_net,sale_net_manual,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?)",
                 (stid, *[sd[f] for f in STOCK_FIELDS],
                  photo_id, photo_size, photo_w, photo_h,
                  si.get("status") if si.get("status") in stock_mod.STATUSES else "achete",
                  si.get("sale_price"), si.get("sale_platform"),
-                 si.get("sale_net"), int(bool(si.get("sale_net_manual"))), si.get("card_id"),
+                 si.get("sale_net"), int(bool(si.get("sale_net_manual"))),
                  str(si.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for ev in si.get("events") or []:
