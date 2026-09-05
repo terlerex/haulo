@@ -1466,6 +1466,10 @@ def api_list_card_deals():
         cards_by_id = {r["id"]: dict(r) for r in con.execute(
             "SELECT id,name,set_name,card_number,lang,grade,type,photo_id,buy_max_computed FROM cards"
         )}
+        stock_count_by_line = {r["source_order_line_id"]: r["n"] for r in con.execute(
+            "SELECT source_order_line_id, COUNT(*) AS n FROM stock_items "
+            "WHERE source_order_line_id IS NOT NULL GROUP BY source_order_line_id"
+        )}
     lines_by_order: dict[str, list] = {}
     for l in lines_all:
         lines_by_order.setdefault(l["order_id"], []).append(l)
@@ -1488,6 +1492,7 @@ def api_list_card_deals():
                 "buy_max_computed": c["buy_max_computed"],
                 **_card_photo_urls(c),
             }
+            row["sent_to_stock"] = bool(stock_count_by_line.get(row["id"]))
             # Alerte de dépassement : jamais bloquante, juste visible tout de
             # suite sur la ligne (montant en rouge côté frontend) plutôt qu'à
             # la réception du colis. Comparé au coût tout compris (landed,
@@ -2029,7 +2034,8 @@ def _stock_photo_urls(row: dict) -> dict:
     return {"photo_url": None, "photo_thumb_url": None}
 
 
-def _stock_view(row: dict, events: list[dict], cards_by_id: dict | None = None) -> dict:
+def _stock_view(row: dict, events: list[dict], cards_by_id: dict | None = None,
+                 source_orders: dict | None = None) -> dict:
     d = dict(row)
     delays = stock_mod.compute_delays(events)
     d["delays"] = {"import_days": delays["import_days"], "listing_days": delays["listing_days"],
@@ -2049,6 +2055,9 @@ def _stock_view(row: dict, events: list[dict], cards_by_id: dict | None = None) 
     over = round(cb - bm, 2) if (bm is not None and cb) else None
     d["buy_over_max_eur"] = over if (over is not None and over > 0) else None
     d["buy_over_max_pct"] = round(over / bm * 100, 1) if (d["buy_over_max_eur"] and bm) else None
+    # Origine du coût de revient, quand il vient d'un envoi direct depuis une
+    # commande d'import — traçabilité du montant, pas juste un lien décoratif.
+    d["source_order"] = (source_orders or {}).get(d.get("source_order_line_id"))
     return d
 
 
@@ -2058,10 +2067,14 @@ def api_list_stock():
         rows = [dict(r) for r in con.execute("SELECT * FROM stock_items ORDER BY created_at DESC")]
         all_events = [dict(r) for r in con.execute("SELECT * FROM stock_events ORDER BY at")]
         cards_by_id = {r["id"]: dict(r) for r in con.execute("SELECT id, buy_max_computed FROM cards")}
+        source_orders = {r["line_id"]: {"order_id": r["order_id"], "order_name": r["order_name"]} for r in con.execute(
+            "SELECT iol.id AS line_id, io.id AS order_id, io.name AS order_name "
+            "FROM import_order_lines iol JOIN import_orders io ON io.id = iol.order_id"
+        )}
     events_by_stock: dict[str, list] = {}
     for e in all_events:
         events_by_stock.setdefault(e["stock_id"], []).append(e)
-    views = [_stock_view(r, events_by_stock.get(r["id"], []), cards_by_id) for r in rows]
+    views = [_stock_view(r, events_by_stock.get(r["id"], []), cards_by_id, source_orders) for r in rows]
     kpis = stock_mod.build_kpis(rows, events_by_stock)
     n_over_max = sum(1 for v in views if v.get("buy_over_max_eur"))
     return {"stock": views, "kpis": kpis, "n_over_max": n_over_max}
@@ -2321,6 +2334,69 @@ def api_transfer_item_to_stock(iid: str):
     return {"id": sid}
 
 
+@app.post("/api/import-order-lines/{lid}/to-stock")
+def api_line_to_stock(lid: str):
+    """Commande d'import -> Stock, directement (sans détour par le porte-
+    feuille). Le prix d'achat de chaque exemplaire est le COÛT DE REVIENT
+    calculé de la ligne (article + part des frais/taxes), les montants
+    réellement facturés si la commande est reçue avec des frais réels saisis
+    — jamais le seul prix d'article. qty>1 -> un stock_item par exemplaire,
+    répartis au centime près (même logique que le total de la commande) pour
+    que leur somme reconstitue exactement le coût de la ligne."""
+    with db() as con:
+        line = con.execute("SELECT * FROM import_order_lines WHERE id=?", (lid,)).fetchone()
+        if not line:
+            raise HTTPException(404, "ligne introuvable")
+        line = dict(line)
+        if con.execute("SELECT 1 FROM stock_items WHERE source_order_line_id=?", (lid,)).fetchone():
+            raise HTTPException(400, "cette ligne a déjà été envoyée au stock")
+        order = dict(con.execute("SELECT * FROM import_orders WHERE id=?", (line["order_id"],)).fetchone())
+        lines = [dict(r) for r in con.execute(
+            "SELECT * FROM import_order_lines WHERE order_id=? ORDER BY sort_order", (line["order_id"],)
+        )]
+        card = None
+        if line.get("card_id"):
+            crow = con.execute("SELECT * FROM cards WHERE id=?", (line["card_id"],)).fetchone()
+            card = dict(crow) if crow else None
+    cs = get_card_settings()
+    computed = card_deals_mod.build_import_order_view(order, lines, cs, order["fx_rate"])
+    row = next((r for r in computed["lines"] if r["id"] == lid), None)
+    if not row:
+        raise HTTPException(400, "impossible de calculer le coût de cette ligne")
+    qty = max(1, int(line["qty"]))
+    per_unit_cost = (card_deals_mod._round_alloc(row["landed_total"], [1.0] * qty)
+                      if qty > 1 else [row["landed_total"]])
+    name = card["name"] if card else (line["name"] or "Carte sans nom")
+    set_name = card["set_name"] if card else ""
+    card_number = card["card_number"] if card else ""
+    lang = (card["lang"] if card else "") or "FR"
+    grade = card["grade"] if card else ""
+    ctype = card["type"] if card else (line["type"] if line["type"] in ("loose", "gradee") else "loose")
+    buy_date = str(order.get("order_date") or date.today().isoformat())[:10]
+    now = datetime.now().isoformat(timespec="seconds")
+    new_ids = []
+    with db() as con:
+        for cost in per_unit_cost:
+            sid = nid()
+            d = {
+                "linked_item_id": None, "name": name, "set_name": set_name, "card_number": card_number,
+                "lang": lang, "type": ctype, "grade": grade, "cost_basis": cost, "buy_date": buy_date,
+                "buy_platform": order.get("supplier") or "", "buy_url": "",
+                "target_price": line.get("resale_target_eur"), "target_platform": line.get("resale_platform"),
+                "notes": "", "source_order_line_id": lid,
+                "card_id": line.get("card_id"), "target_overridden": 0,
+            }
+            con.execute(
+                f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
+                (sid, *[d[f] for f in STOCK_FIELDS], "achete", now),
+            )
+            con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                        (nid(), sid, None, "achete", buy_date))
+            new_ids.append(sid)
+    return {"ids": new_ids}
+
+
 # --- photo de ligne de stock (une seule, facultative — même pipeline que items/fiches) ---
 
 @app.post("/api/stock/{sid}/photo")
@@ -2527,9 +2603,12 @@ def _card_photo_urls(row: dict) -> dict:
 
 
 def _resolve_photo_urls(card_id: str | None, own_url: str | None, own_thumb: str | None) -> tuple:
-    """Règle de surcharge : la photo du référentiel prime si elle existe,
-    sinon on retombe sur la photo propre de l'exemplaire (jamais d'écran vide
-    juste parce que la carte liée n'a pas encore de photo)."""
+    """Règle de surcharge : la photo propre de l'exemplaire prime si elle
+    existe (cet exemplaire précis peut différer visuellement — centrage, état
+    réel photographié), sinon on retombe sur celle du référentiel (jamais
+    d'écran vide juste parce que l'exemplaire n'a pas sa propre photo)."""
+    if own_url:
+        return own_url, own_thumb
     if card_id:
         with db() as con:
             row = con.execute("SELECT photo_id FROM cards WHERE id=?", (card_id,)).fetchone()

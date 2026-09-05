@@ -997,6 +997,8 @@ function orderLineRow(l, order){
       <span>
         <button class="x" data-toggle-line="${l.id}" title="Détail (devise, montant, revente visée)">⚙</button>
         ${order.status==="recue" && !l.item_id ? `<button class="x" data-realize-line="${l.id}" title="Basculer au portefeuille">↦</button>` : ""}
+        ${order.status==="recue" && !l.sent_to_stock ? `<button class="x" data-line-to-stock="${l.id}" title="Envoyer au stock, au coût de revient calculé">📦</button>` : ""}
+        ${l.sent_to_stock ? `<span class="dim" style="font-size:10px" title="Déjà envoyée au stock">📦✓</span>` : ""}
         <button class="x" data-del-line="${l.id}" title="Supprimer">✕</button>
       </span>
     </div>
@@ -1011,7 +1013,7 @@ function orderLineRow(l, order){
           value="${l.unit_currency==="EUR"?(l.unit_price_eur??""):(l.unit_price_jpy??"")}"></label>
       </div>
       <div class="f2" style="margin:0 0 10px">
-        <label><span class="lb">Revente visée (€)${l.resale_target_overridden?` <span class="tag" style="font-size:9px">modifié</span>`:""}</span>
+        <label><span class="lb">Revente visée (€)${l.resale_target_overridden?` <span class="tag t-scelle" style="font-size:9px">modifié</span>`:""}</span>
           <input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
         <label><span class="lb">Plateforme</span><select id="ole-platform-${l.id}">
           <option value="">—</option>
@@ -1418,10 +1420,11 @@ function stockSheet(id){
       <label><span class="lb">Date d'achat</span><input id="st-buydate" type="date" value="${r?.buy_date||today()}"></label>
       <label><span class="lb">Plateforme d'achat</span><input id="st-buyplatform" value="${esc(r?.buy_platform||"")}"></label>
     </div>
+    ${r?.source_order ? `<p class="note">Coût de revient repris de <button class="tag t-loose" data-open-order="${r.source_order.order_id}" style="cursor:pointer">${esc(r.source_order.order_name||"la commande")}</button></p>` : ""}
     ${r?.buy_over_max_eur ? `<div class="warn">⚠ dépasse le prix d'achat max de ${eur(r.buy_over_max_eur)}${r.buy_over_max_pct!=null?` (${pct(r.buy_over_max_pct)})`:""}</div>` : ""}
     <label><span class="lb">Lien d'achat</span><input id="st-buyurl" value="${esc(r?.buy_url||"")}" placeholder="https://…"></label>
     <div class="f2">
-      <label><span class="lb">Prix de vente visé${r?.target_overridden?` <span class="tag" style="font-size:9px">modifié</span>`:""}</span>
+      <label><span class="lb">Prix de vente visé${r?.target_overridden?` <span class="tag t-scelle" style="font-size:9px">modifié</span>`:""}</span>
         <input id="st-target" type="number" min="0" step="0.01" value="${r?.target_price??""}"></label>
       <label><span class="lb">Plateforme de vente visée</span><select id="st-targetplatform">
         <option value="">—</option>
@@ -1508,7 +1511,26 @@ function pickACardSheet(res, budget){
 /* Référentiel de cartes — plomberie, presque rien à l'écran               */
 /* ======================================================================= */
 function cardBadge(cardId){
-  return cardId ? `<button class="tag" data-open-card="${cardId}" style="cursor:pointer;margin-top:4px;display:inline-block">Liée</button>` : "";
+  return cardId ? `<button class="tag t-loose" data-open-card="${cardId}" style="cursor:pointer;margin-top:4px;display:inline-block">Liée</button>` : "";
+}
+
+function cardPhotoBlock(c){
+  if(c.photo_url){
+    return `<div style="position:relative;flex-shrink:0">
+      <img src="${c.photo_thumb_url}" alt="" data-open-lightbox="${c.photo_url}"
+        style="width:76px;height:106px;object-fit:cover;border-radius:10px;border:1px solid var(--line);cursor:pointer;display:block">
+      <button class="x" data-replace-card-photo="${c.id}" title="Remplacer la photo"
+        style="position:absolute;bottom:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✎</button>
+      <button class="x" data-del-card-photo="${c.id}" title="Supprimer la photo"
+        style="position:absolute;top:-6px;right:-6px;background:var(--panel);border:1px solid var(--line);border-radius:50%;width:22px;height:22px;padding:0;line-height:20px;font-size:11px;min-width:0;min-height:0">✕</button>
+      <input id="card-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-card="${c.id}" hidden>
+    </div>`;
+  }
+  return `<label style="width:76px;height:106px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+      border:1px dashed var(--line);border-radius:10px;cursor:pointer;color:var(--muted);font-size:22px;margin:0" title="Ajouter une photo">
+    +
+    <input id="card-photo-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" data-card="${c.id}" hidden>
+  </label>`;
 }
 
 async function cardEntrySheet(cardId){
@@ -1522,8 +1544,7 @@ async function cardEntrySheet(cardId){
   openSheet(`
     <div class="sheet-head">
       <div style="display:flex;gap:12px;flex:1;min-width:0">
-        ${c.photo_url ? `<img src="${c.photo_thumb_url}" alt="" data-open-lightbox="${c.photo_url}"
-            style="width:76px;height:106px;object-fit:cover;border-radius:10px;border:1px solid var(--line);cursor:pointer;flex-shrink:0">` : ""}
+        ${cardPhotoBlock(c)}
         <div style="min-width:0"><span class="eyebrow">Référentiel</span>
           <h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</h2>
           <span class="dim" style="font-size:13px">${[c.set_name,c.card_number,c.lang,c.grade].filter(Boolean).map(esc).join(" · ")}</span></div>
@@ -2106,6 +2127,14 @@ document.addEventListener("click", async ev=>{
       await api(`/api/card-sheets/${dsp.dataset.delSheetPhoto}/photo`,{method:"DELETE"});
       await loadCardDeals(); return cardSheetSheet(dsp.dataset.delSheetPhoto);
     }
+    const rcp = t.closest("[data-replace-card-photo]");
+    if(rcp){ document.getElementById("card-photo-file")?.click(); return; }
+    const dcp = t.closest("[data-del-card-photo]");
+    if(dcp){
+      if(!confirm("Supprimer cette photo ?")) return;
+      await api(`/api/cards/${dcp.dataset.delCardPhoto}/photo`,{method:"DELETE"});
+      await Promise.all([loadCardDeals(), loadStock()]); return cardEntrySheet(dcp.dataset.delCardPhoto);
+    }
 
     // --- Achat-revente : commandes d'import Japon ---
     const so = t.closest("[data-save-order]");
@@ -2205,6 +2234,12 @@ document.addEventListener("click", async ev=>{
       if(!confirm("Basculer cette carte au portefeuille avec son coût de revient calculé comme prix d'achat ?")) return;
       await api(`/api/import-order-lines/${rlz.dataset.realizeLine}/realize`,{method:"POST",json:{}});
       await Promise.all([loadCardDeals(), refresh()]); return importOrderSheet(openOrderId);
+    }
+    const lts = t.closest("[data-line-to-stock]");
+    if(lts){
+      if(!confirm("Envoyer cette carte au stock, au coût de revient calculé (article + part des frais/taxes) ?")) return;
+      await api(`/api/import-order-lines/${lts.dataset.lineToStock}/to-stock`,{method:"POST"});
+      await Promise.all([loadCardDeals(), loadStock()]); return importOrderSheet(openOrderId);
     }
     const scs = t.closest("[data-save-card-settings]");
     if(scs){
@@ -2423,6 +2458,23 @@ document.addEventListener("change", async e=>{
     const fd = new FormData(); fd.append("file", f);
     await api(`/api/card-sheets/${sid}/photo`,{method:"POST", body:fd});
     await loadCardDeals(); return cardSheetSheet(sid);
+  }catch(err){ alert("Upload impossible : "+err.message); }
+});
+// Upload de la photo d'une carte du référentiel (une seule, ajout ou
+// remplacement) — propagée à tous les exemplaires liés qui n'ont pas leur
+// propre photo (cf. _resolve_photo_urls côté serveur).
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="card-photo-file") return;
+  const cid = e.target.dataset.card;
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if(!f || !cid) return;
+  if(f.size > 10*1024*1024){ alert(`${f.name} > 10 Mo, ignoré`); return; }
+  try{
+    const fd = new FormData(); fd.append("file", f);
+    await api(`/api/cards/${cid}/photo`,{method:"POST", body:fd});
+    await Promise.all([loadCardDeals(), loadStock()]);
+    return cardEntrySheet(cid);
   }catch(err){ alert("Upload impossible : "+err.message); }
 });
 // Upload de la photo d'une ligne de stock (une seule, ajout ou remplacement).
