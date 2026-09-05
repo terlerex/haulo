@@ -232,6 +232,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
     <button data-mode="watch" aria-pressed="false"><span class="ico">◇</span><span>Veille <span id="watch-count"></span></span></button>
     <button data-mode="deals" aria-pressed="false"><span class="ico">⇄</span><span>Achat-revente</span></button>
     <button data-mode="stock" aria-pressed="false"><span class="ico">📦</span><span>Stock</span></button>
+    <button data-mode="studio" aria-pressed="false"><span class="ico">🎨</span><span>Studio</span></button>
     <button data-action="menu" aria-label="Menu"><span class="ico">⋯</span><span>Menu</span></button>
   </nav>
 
@@ -302,6 +303,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
     <div class="list" id="rows"></div>
     <div id="stock-body" style="display:none"></div>
+    <div id="studio-body" style="display:none"></div>
   </main>
 </div>
 
@@ -483,6 +485,7 @@ function renderCardDeals(){
 function renderRows(){
   if(mode==="deals") return renderCardDeals();
   if(mode==="stock") return renderStock();
+  if(mode==="studio") return;
   const host = document.getElementById("rows");
   const pool = S.items.filter(i => (i.status||"owned")===mode);
   document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
@@ -1508,6 +1511,293 @@ function pickACardSheet(res, budget){
 }
 
 /* ======================================================================= */
+/* Studio photo — détourage + fond déterministe, par lot                   */
+/* ======================================================================= */
+let studioJob = null;      // {job, pairs} du dernier lot chargé
+let studioPolling = null;  // id de setInterval pendant le traitement
+const BG_MODE_LABELS = {aplat:"Aplat uni", palette:"Palette", continuite:"Continuité"};
+const BG_COLOR_LABELS = {noir:"Noir", blanc:"Blanc", gris:"Gris"};
+
+function renderStudio(){
+  const host = document.getElementById("studio-body");
+  host.innerHTML = `
+    <span class="eyebrow">Studio photo</span>
+    <h2 style="margin:4px 0 14px">Détourage + fond automatique</h2>
+    <p class="note" style="margin-bottom:14px">Envoie tes photos recto/verso en vrac (jusqu'à 40) : détourage,
+      redressement et pose sur fond se font tout seuls. Traitement déterministe — pas d'IA générative,
+      pas de reconnaissance de la carte.</p>
+    <div class="f3">
+      <label><span class="lb">Type</span><select id="st-kind">
+        <option value="carte">Carte nue</option>
+        <option value="slab">Slab PSA</option>
+      </select></label>
+      <label><span class="lb">Fond</span><select id="st-bgmode">
+        <option value="aplat">Aplat uni</option>
+        <option value="palette">Palette (couleurs de la carte)</option>
+        <option value="continuite">Continuité (flou de la carte)</option>
+      </select></label>
+      <label id="st-bgcolor-wrap"><span class="lb">Couleur</span><select id="st-bgcolor">
+        <option value="noir">Noir</option>
+        <option value="blanc">Blanc</option>
+        <option value="gris">Gris</option>
+      </select></label>
+    </div>
+    <input type="file" id="st-files" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple hidden>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="btn primary" data-studio-pick-files>+ Choisir des photos (jusqu'à 40)</button>
+      <span class="dim" id="st-files-count"></span>
+    </div>
+    <div id="studio-progress"></div>
+    <div id="studio-grid" style="margin-top:14px"></div>
+  `;
+  document.getElementById("st-bgmode").addEventListener("change", e=>{
+    document.getElementById("st-bgcolor-wrap").style.display = e.target.value==="aplat" ? "" : "none";
+  });
+  document.getElementById("st-files").addEventListener("change", e=>{
+    const n = e.target.files.length;
+    document.getElementById("st-files-count").textContent = n ? `${n} photo${n>1?"s":""} sélectionnée${n>1?"s":""}` : "";
+  });
+}
+
+async function studioUpload(){
+  const files = document.getElementById("st-files").files;
+  if(!files.length) return alert("Choisis au moins une photo.");
+  if(files.length > 40) return alert("40 photos maximum par envoi.");
+  const kind = document.getElementById("st-kind").value;
+  const bgMode = document.getElementById("st-bgmode").value;
+  const bgColor = document.getElementById("st-bgcolor").value;
+  const fd = new FormData();
+  for(const f of files) fd.append("files", f);
+  document.getElementById("studio-progress").innerHTML = `<p class="note">Envoi en cours…</p>`;
+  let res;
+  try{
+    res = await fetch(`/api/studio/jobs?kind=${kind}&bg_mode=${bgMode}&bg_color=${bgColor}`,
+      {method:"POST", body:fd, credentials:"same-origin"});
+    if(!res.ok) throw new Error(await res.text());
+    res = await res.json();
+  }catch(err){
+    document.getElementById("studio-progress").innerHTML = `<p class="note">Échec de l'envoi : ${esc(String(err))}</p>`;
+    return;
+  }
+  document.getElementById("st-files").value = "";
+  document.getElementById("st-files-count").textContent = "";
+  studioPollJob(res.job_id);
+}
+
+function studioPollJob(jobId){
+  if(studioPolling) clearInterval(studioPolling);
+  const tick = async ()=>{
+    const data = await api(`/api/studio/jobs/${jobId}`);
+    studioJob = data;
+    renderStudioProgress(data.job);
+    renderStudioGrid(data.pairs, data.job);
+    if(data.job.status==="done"){ clearInterval(studioPolling); studioPolling=null; }
+  };
+  tick();
+  studioPolling = setInterval(tick, 1500);
+}
+
+function renderStudioProgress(job){
+  const host = document.getElementById("studio-progress");
+  if(job.status==="done"){ host.innerHTML = ""; return; }
+  const pct = job.total ? Math.round(job.processed/job.total*100) : 0;
+  host.innerHTML = `
+    <div style="background:var(--panel2);border-radius:99px;height:10px;overflow:hidden;margin:12px 0 6px">
+      <div style="background:var(--accent);height:100%;width:${pct}%;transition:width .3s"></div>
+    </div>
+    <p class="note">${job.processed} / ${job.total} traitées</p>`;
+}
+
+function studioConfBadge(v){
+  if(v==null) return "";
+  const cls = v < photostudioReviewThreshold ? "loss" : "gain";
+  return `<span class="${cls}" style="font-size:12px;font-weight:600">${Math.round(v*100)}%</span>`;
+}
+const photostudioReviewThreshold = 0.55;
+
+function renderStudioGrid(pairs, job){
+  const host = document.getElementById("studio-grid");
+  if(!pairs.length){ host.innerHTML = ""; return; }
+  host.innerHTML = `
+    <span class="eyebrow">Relecture (${pairs.length}) — douteuses en tête</span>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin:10px 0">
+      ${pairs.map(p=>studioCard(p, job)).join("")}
+    </div>
+    <div class="actions" style="justify-content:flex-start;margin-top:10px">
+      <button class="btn primary" data-studio-export="${job.id}">Télécharger le ZIP de la sélection</button>
+      <label style="display:flex;align-items:center;gap:6px;min-height:auto">
+        <input type="checkbox" id="st-select-all" style="width:auto;min-height:auto"> Tout sélectionner
+      </label>
+    </div>`;
+  document.getElementById("st-select-all")?.addEventListener("change", e=>{
+    host.querySelectorAll(".st-select").forEach(cb=> cb.checked = e.target.checked);
+  });
+}
+
+function studioCard(p, job){
+  const warn = p.status==="needs_review" ? `<div class="warn" style="margin:6px 0">⚠ à revoir</div>` : "";
+  const err = p.status==="error" ? `<div class="warn" style="margin:6px 0">✕ échec du traitement</div>` : "";
+  const thumb = p.urls.recto ? `<img src="${p.urls.recto.jpg}" alt="" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;border:1px solid var(--line)">`
+    : `<div style="width:100%;aspect-ratio:1;border-radius:8px;background:var(--panel2)"></div>`;
+  return `<div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default" data-studio-pair="${p.id}">
+    <label style="display:flex;justify-content:flex-end;min-height:auto;margin-bottom:4px">
+      <input type="checkbox" class="st-select" data-pair-checkbox="${p.id}" style="width:auto;min-height:auto"></label>
+    ${thumb}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+      <span class="dim" style="font-size:11px">recto ${studioConfBadge(p.recto_confidence)}${p.verso_confidence!=null?` · verso ${studioConfBadge(p.verso_confidence)}`:""}</span>
+    </div>
+    ${warn}${err}
+    <div class="actions" style="justify-content:flex-start;margin-top:8px;gap:6px">
+      <button class="btn" data-studio-corners="${p.id}" title="Corriger le détourage à la main">Coins</button>
+      <button class="btn" data-studio-bgpicker="${p.id}" title="Changer le mode de fond">Fond</button>
+      <button class="btn" data-studio-attach-picker="${p.id}" title="Rattacher au stock ou au référentiel">Rattacher</button>
+      <button class="btn danger ghost" data-studio-discard="${p.id}" title="Écarter">Écarter</button>
+    </div>
+  </div>`;
+}
+
+function studioBgSheet(pid){
+  const p = studioJob.pairs.find(x=>x.id===pid);
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Fond</span><h2>Changer le mode</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="f2">
+      <label><span class="lb">Mode</span><select id="stbg-mode">
+        ${Object.entries(BG_MODE_LABELS).map(([k,l])=>`<option value="${k}" ${p.bg_mode===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+      <label id="stbg-color-wrap" style="${p.bg_mode==="aplat"?"":"display:none"}"><span class="lb">Couleur</span><select id="stbg-color">
+        ${Object.entries(BG_COLOR_LABELS).map(([k,l])=>`<option value="${k}" ${p.bg_color===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="actions"><button class="btn primary" data-studio-save-bg="${pid}" style="width:100%">Appliquer</button></div>
+  `,"center");
+  document.getElementById("stbg-mode").addEventListener("change", e=>{
+    document.getElementById("stbg-color-wrap").style.display = e.target.value==="aplat" ? "" : "none";
+  });
+}
+
+function studioAttachSheet(pid){
+  const openOrders = (cardDeals?.import_orders||[]);
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Rattacher</span><h2>Où ranger ce rendu ?</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">La photo recto devient celle de la ligne de stock ou de la carte choisie.</p>
+    <div style="margin:8px 0">${(stockData?.stock||[]).slice(0,30).map(r=>`
+      <div class="comp" style="cursor:pointer" data-studio-do-attach="${pid}" data-stock-id="${r.id}"><span>${esc(r.name)}</span><span class="dim">Stock</span></div>`).join("")}
+    </div>
+  `,"center");
+}
+
+async function studioApplyBg(pid){
+  const bgMode = document.getElementById("stbg-mode").value;
+  const bgColor = document.getElementById("stbg-color").value;
+  await api(`/api/studio/pairs/${pid}/background`, {method:"PUT", json:{bg_mode:bgMode, bg_color:bgColor}});
+  closeSheet();
+  studioPollJob(studioJob.job.id);
+}
+
+/* ---------------- éditeur de coins (redressement manuel) ---------------- */
+let cornerEditorState = null; // {pid, side, img, scale, points:[{x,y}x4], dragging}
+
+async function studioCornersSheet(pid){
+  const p = studioJob.pairs.find(x=>x.id===pid);
+  const side = p.urls.recto ? "recto" : "verso";
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Détourage manuel</span><h2>Déplace les 4 coins</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">Glisse chaque coin sur les bords réels de la carte, puis valide pour redresser et recomposer.</p>
+    <div class="f2" style="margin-bottom:10px"><label><span class="lb">Côté</span><select id="ce-side">
+      ${p.recto_quad?`<option value="recto" ${side==="recto"?"selected":""}>Recto</option>`:""}
+      ${p.verso_quad?`<option value="verso" ${side==="verso"?"selected":""}>Verso</option>`:""}
+    </select></label></div>
+    <canvas id="ce-canvas" style="width:100%;touch-action:none;border-radius:8px;border:1px solid var(--line);cursor:crosshair"></canvas>
+    <div class="actions"><button class="btn primary" data-studio-save-corners="${pid}" style="width:100%">Valider</button></div>
+  `,"center");
+  document.getElementById("ce-side").addEventListener("change", e=> loadCornerEditor(pid, e.target.value));
+  await loadCornerEditor(pid, side);
+}
+
+async function loadCornerEditor(pid, side){
+  const p = studioJob.pairs.find(x=>x.id===pid);
+  const quad = side==="recto" ? p.recto_quad : p.verso_quad;
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  await new Promise(resolve=>{
+    img.onload = resolve;
+    img.src = `/api/studio/pairs/${pid}/raw/${side}?t=${Date.now()}`;
+  });
+  const canvas = document.getElementById("ce-canvas");
+  const displayW = Math.min(560, img.naturalWidth);
+  const scale = displayW / img.naturalWidth;
+  canvas.width = displayW;
+  canvas.height = Math.round(img.naturalHeight * scale);
+  cornerEditorState = {
+    pid, side, img, scale,
+    points: quad.map(([x,y])=>({x:x*scale, y:y*scale})),
+    dragging: -1,
+  };
+  drawCornerEditor();
+  wireCornerEditorEvents();
+}
+
+function drawCornerEditor(){
+  const st = cornerEditorState;
+  const canvas = document.getElementById("ce-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(st.img, 0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#3EDC7B"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  st.points.forEach((pt,i)=> i===0 ? ctx.moveTo(pt.x,pt.y) : ctx.lineTo(pt.x,pt.y));
+  ctx.closePath(); ctx.stroke();
+  st.points.forEach(pt=>{
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, 9, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(62,220,123,.9)"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#06120B"; ctx.stroke();
+  });
+}
+
+function wireCornerEditorEvents(){
+  const canvas = document.getElementById("ce-canvas");
+  const posFromEvent = e=>{
+    const r = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / r.width, scaleY = canvas.height / r.height;
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+    return {x: cx*scaleX, y: cy*scaleY};
+  };
+  const down = e=>{
+    const pos = posFromEvent(e);
+    const st = cornerEditorState;
+    let best=-1, bestD=26;
+    st.points.forEach((pt,i)=>{
+      const d = Math.hypot(pt.x-pos.x, pt.y-pos.y);
+      if(d<bestD){ bestD=d; best=i; }
+    });
+    st.dragging = best;
+  };
+  const move = e=>{
+    const st = cornerEditorState;
+    if(st.dragging<0) return;
+    e.preventDefault();
+    const pos = posFromEvent(e);
+    st.points[st.dragging] = {x: Math.max(0,Math.min(canvas.width,pos.x)), y: Math.max(0,Math.min(canvas.height,pos.y))};
+    drawCornerEditor();
+  };
+  const up = ()=>{ cornerEditorState.dragging = -1; };
+  canvas.onmousedown = down; canvas.onmousemove = move; canvas.onmouseup = up; canvas.onmouseleave = up;
+  canvas.ontouchstart = down; canvas.ontouchmove = move; canvas.ontouchend = up;
+}
+
+async function studioSaveCorners(pid){
+  const st = cornerEditorState;
+  const quad = st.points.map(pt=>[pt.x/st.scale, pt.y/st.scale]);
+  await api(`/api/studio/pairs/${pid}/corners`, {method:"PUT", json:{side:st.side, quad}});
+  closeSheet();
+  studioPollJob(studioJob.job.id);
+}
+
+/* ======================================================================= */
 /* Référentiel de cartes — plomberie, presque rien à l'écran               */
 /* ======================================================================= */
 function cardBadge(cardId){
@@ -2064,6 +2354,41 @@ document.addEventListener("click", async ev=>{
       await loadStock(); return renderRows();
     }
 
+    // --- Studio photo ---
+    if(t.closest("[data-studio-pick-files]")){
+      const fi = document.getElementById("st-files");
+      fi.onchange = studioUpload;
+      return fi.click();
+    }
+    const stc = t.closest("[data-studio-corners]"); if(stc) return studioCornersSheet(stc.dataset.studioCorners);
+    const stbgp = t.closest("[data-studio-bgpicker]"); if(stbgp) return studioBgSheet(stbgp.dataset.studioBgpicker);
+    const stap = t.closest("[data-studio-attach-picker]"); if(stap) return studioAttachSheet(stap.dataset.studioAttachPicker);
+    const stsb = t.closest("[data-studio-save-bg]"); if(stsb) return studioApplyBg(stsb.dataset.studioSaveBg);
+    const stsc = t.closest("[data-studio-save-corners]"); if(stsc) return studioSaveCorners(stsc.dataset.studioSaveCorners);
+    const stda = t.closest("[data-studio-do-attach]");
+    if(stda){
+      await api(`/api/studio/pairs/${stda.dataset.studioDoAttach}/attach`,{method:"POST",json:{stock_id:stda.dataset.stockId}});
+      closeSheet(); studioPollJob(studioJob.job.id); return;
+    }
+    const std = t.closest("[data-studio-discard]");
+    if(std){
+      if(!confirm("Écarter ce rendu ? Les fichiers seront supprimés.")) return;
+      await api(`/api/studio/pairs/${std.dataset.studioDiscard}/discard`,{method:"POST"});
+      studioPollJob(studioJob.job.id); return;
+    }
+    const ste = t.closest("[data-studio-export]");
+    if(ste){
+      const ids = [...document.querySelectorAll(".st-select:checked")].map(cb=>cb.dataset.pairCheckbox);
+      if(!ids.length) return alert("Sélectionne au moins un rendu.");
+      const r = await fetch(`/api/studio/jobs/${ste.dataset.studioExport}/export`,
+        {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({pair_ids:ids}), credentials:"same-origin"});
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = `studio-${ste.dataset.studioExport}.zip`; a.click();
+      URL.revokeObjectURL(a.href);
+      return;
+    }
+
     const os = t.closest("[data-open-sheet]"); if(os) return cardSheetSheet(os.dataset.openSheet);
     const oo = t.closest("[data-open-order]"); if(oo) return importOrderSheet(oo.dataset.openOrder);
 
@@ -2393,12 +2718,14 @@ document.addEventListener("click", async ev=>{
       document.getElementById("stock-toolbar").style.display = mode==="stock" ? "flex" : "none";
       document.getElementById("stock-tabs").style.display = mode==="stock" ? "flex" : "none";
       document.getElementById("stock-hero").style.display = mode==="stock" ? "block" : "none";
-      document.querySelector("section.hero:not(#stock-hero)").style.display = mode==="stock" ? "none" : "block";
-      document.getElementById("rows").style.display = mode==="stock" ? "none" : "flex";
+      document.querySelector("section.hero:not(#stock-hero)").style.display = (mode==="stock"||mode==="studio") ? "none" : "block";
+      document.getElementById("rows").style.display = (mode==="stock"||mode==="studio") ? "none" : "flex";
       document.getElementById("stock-body").style.display = mode==="stock" ? "block" : "none";
-      document.querySelector("main.content").classList.toggle("full-width", mode==="stock");
+      document.getElementById("studio-body").style.display = mode==="studio" ? "block" : "none";
+      document.querySelector("main.content").classList.toggle("full-width", mode==="stock"||mode==="studio");
       if(mode==="deals" && !cardDeals) await loadCardDeals();
       if(mode==="stock" && !stockData) await loadStock();
+      if(mode==="studio") renderStudio();
       return renderRows();
     }
     const sfChip = t.closest("[data-stock-filter]");

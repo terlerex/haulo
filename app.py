@@ -14,25 +14,32 @@ Sans PORTFOLIO_PASSWORD, l'accès est libre : réservé à un usage sur réseau 
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
-from datetime import date, datetime
+import zipfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import JSONResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+import numpy as np
+import cv2
 
 import media as media_mod
 import deals as deals_mod
 import card_deals as card_deals_mod
 import stock as stock_mod
 import cards as cards_mod
+import photostudio as photostudio_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -45,6 +52,8 @@ DEAL_MEDIA = MEDIA / "_deals"     # sous-namespace dédié pour ne pas collision
 CARD_SHEET_MEDIA = MEDIA / "_card_sheets"  # une seule photo par fiche, même pipeline que items/deals
 STOCK_MEDIA = MEDIA / "_stock"             # idem pour les lignes de stock
 CARD_MEDIA = MEDIA / "_cards"              # photo de référence du référentiel de cartes
+STUDIO_RAW = MEDIA / "_studio_raw"         # bruts envoyés, temporaires (supprimés après rendu/rejet)
+STUDIO_RENDERS = MEDIA / "_studio_renders" # rendus finaux (JPEG+WebP), purgés à 30j si non rattachés
 
 SOURCES = {
     "ebay": ("eBay — vendu", 1.00),
@@ -320,6 +329,40 @@ def init() -> None:
                 previous_card_id TEXT, at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS card_merge_log_merge ON card_merge_log(merge_id);
+
+            -- Studio photo : détourage + fond déterministe, par lot. Une
+            -- "paire" = recto (+ verso facultatif) d'une même carte/slab —
+            -- le composite et le label PSA en dérivent, jamais stockés à part.
+            CREATE TABLE IF NOT EXISTS studio_jobs(
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'carte',
+                bg_mode TEXT NOT NULL DEFAULT 'aplat',
+                bg_color TEXT NOT NULL DEFAULT 'noir',
+                status TEXT NOT NULL DEFAULT 'processing',
+                total INTEGER NOT NULL DEFAULT 0,
+                processed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS studio_pairs(
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES studio_jobs(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'carte',
+                bg_mode TEXT NOT NULL DEFAULT 'aplat',
+                bg_color TEXT NOT NULL DEFAULT 'noir',
+                status TEXT NOT NULL DEFAULT 'queued',
+                recto_raw TEXT, verso_raw TEXT,
+                recto_quad_json TEXT, verso_quad_json TEXT,
+                recto_confidence REAL, verso_confidence REAL,
+                recto_render_json TEXT, verso_render_json TEXT,
+                composite_render_json TEXT, label_render_json TEXT,
+                warnings_json TEXT DEFAULT '[]',
+                card_id TEXT REFERENCES cards(id),
+                stock_id TEXT REFERENCES stock_items(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                attached_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS studio_pairs_job ON studio_pairs(job_id, sort_order);
             """
         )
         migrate(con)
@@ -3049,6 +3092,522 @@ def api_get_card_thumb(cid: str):
     if not path:
         raise HTTPException(404, "vignette introuvable")
     return FileResponse(path, media_type="image/webp")
+
+
+# ------------------------------------------------------------------ studio photo
+
+STUDIO_MAX_PHOTOS = 40
+STUDIO_PURGE_DAYS = 30
+
+
+def _studio_dir(root: Path, pair_id: str) -> Path:
+    d = root / pair_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _studio_compose(subject_rgba, bg_mode: str, bg_color: str) -> dict:
+    if bg_mode == "aplat":
+        return photostudio_mod.compose_flat(subject_rgba, bg_color)
+    fn = photostudio_mod.COMPOSERS.get(bg_mode, photostudio_mod.compose_flat)
+    return fn(subject_rgba) if fn is not photostudio_mod.compose_flat else fn(subject_rgba, bg_color)
+
+
+def _save_studio_render(pair_id: str, name: str, canvas_rgb) -> dict:
+    outs = photostudio_mod.encode_outputs(canvas_rgb)
+    d = _studio_dir(STUDIO_RENDERS, pair_id)
+    (d / f"{name}.jpg").write_bytes(outs["jpg"])
+    (d / f"{name}.webp").write_bytes(outs["webp"])
+    h, w = canvas_rgb.shape[:2]
+    return {"w": int(w), "h": int(h), "jpg_bytes": len(outs["jpg"]), "webp_bytes": len(outs["webp"])}
+
+
+def _delete_studio_pair_files(pair_id: str) -> None:
+    for root in (STUDIO_RAW, STUDIO_RENDERS):
+        d = root / pair_id
+        if d.exists():
+            for f in d.iterdir():
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+
+
+def _process_studio_side(pair_id: str, kind: str, bg_mode: str, bg_color: str, raw_filename: str,
+                          side: str, forced_quad: list | None = None) -> dict:
+    """Traite UN côté (recto ou verso) : décodage, détection (sauf coins déjà
+    fournis à la main), redressement, composition, encodage — puis libère
+    explicitement les tableaux intermédiaires (photo par photo, jamais 40 en
+    mémoire à la fois, cf. contrainte mémoire du conteneur)."""
+    raw_path = STUDIO_RAW / pair_id / raw_filename
+    raw_bytes = raw_path.read_bytes()
+    bgr = photostudio_mod.decode_upload(raw_bytes)
+    del raw_bytes
+    if forced_quad is not None:
+        quad, confidence = forced_quad, 1.0
+    else:
+        det = photostudio_mod.detect_quad(bgr, kind)
+        quad, confidence = det["quad"], det["confidence"]
+    subject = photostudio_mod.warp_subject(bgr, quad, kind)
+    del bgr
+    composed = _studio_compose(subject, bg_mode, bg_color)
+    render = _save_studio_render(pair_id, side, composed["canvas"])
+    label_render = None
+    if kind == "slab" and side == "recto":
+        label_canvas = photostudio_mod.crop_label(subject)
+        label_outs = photostudio_mod.encode_outputs(cv2_bgr_to_rgb_if_needed(label_canvas))
+        d = _studio_dir(STUDIO_RENDERS, pair_id)
+        (d / "label.jpg").write_bytes(label_outs["jpg"])
+        (d / "label.webp").write_bytes(label_outs["webp"])
+        lh, lw = label_canvas.shape[:2]
+        label_render = {"w": int(lw), "h": int(lh), "jpg_bytes": len(label_outs["jpg"])}
+    del subject
+    return {"quad": quad, "confidence": confidence, "render": render,
+            "warnings": composed["warnings"], "label_render": label_render}
+
+
+def cv2_bgr_to_rgb_if_needed(rgba_or_rgb):
+    """crop_label renvoie du RGBA (sorti de warp_subject) ; encode_outputs
+    attend du RGB — aplatit l'alpha sur fond blanc plutôt que de le jeter
+    brut (le label est toujours un rectangle plein, l'alpha n'y sert qu'au
+    feathering des bords du sujet complet, pas du recadrage lui-même)."""
+    if rgba_or_rgb.shape[2] == 4:
+        rgb = rgba_or_rgb[:, :, :3]
+        alpha = rgba_or_rgb[:, :, 3:4].astype(np.float32) / 255
+        white = np.full_like(rgb, 255)
+        return (rgb * alpha + white * (1 - alpha)).astype(np.uint8)
+    return rgba_or_rgb
+
+
+def _process_studio_pair(pair: dict) -> None:
+    warnings: list[str] = []
+    updates: dict[str, Any] = {}
+    for side in ("recto", "verso"):
+        raw = pair.get(f"{side}_raw")
+        if not raw:
+            continue
+        try:
+            result = _process_studio_side(pair["id"], pair["kind"], pair["bg_mode"], pair["bg_color"],
+                                           raw, side)
+        except Exception as e:
+            updates[f"{side}_confidence"] = 0.0
+            warnings.append(f"{side} : échec du traitement ({e})")
+            continue
+        updates[f"{side}_quad_json"] = json.dumps(result["quad"])
+        updates[f"{side}_confidence"] = result["confidence"]
+        updates[f"{side}_render_json"] = json.dumps(result["render"])
+        warnings.extend(result["warnings"])
+        if result["label_render"]:
+            updates["label_render_json"] = json.dumps(result["label_render"])
+
+    confidences = [updates.get("recto_confidence"), updates.get("verso_confidence")]
+    confidences = [c for c in confidences if c is not None]
+    min_conf = min(confidences) if confidences else 0.0
+    updates["status"] = "needs_review" if min_conf < photostudio_mod.CONFIDENCE_REVIEW_THRESHOLD else "ready"
+    updates["warnings_json"] = json.dumps(warnings)
+
+    # Composite recto+verso côte à côte, si les deux existent.
+    if updates.get("recto_render_json") and updates.get("verso_render_json"):
+        try:
+            recto_bgr = cv2.imread(str(STUDIO_RENDERS / pair["id"] / "recto.jpg"))
+            verso_bgr = cv2.imread(str(STUDIO_RENDERS / pair["id"] / "verso.jpg"))
+            h = min(recto_bgr.shape[0], verso_bgr.shape[0])
+
+            def _fit(img):
+                w = int(img.shape[1] * h / img.shape[0])
+                return cv2.resize(img, (w, h))
+            side_by_side = np.hstack([_fit(recto_bgr), _fit(verso_bgr)])
+            comp_render = _save_studio_render(pair["id"], "composite",
+                                               cv2.cvtColor(side_by_side, cv2.COLOR_BGR2RGB))
+            updates["composite_render_json"] = json.dumps(comp_render)
+            del recto_bgr, verso_bgr, side_by_side
+        except Exception:
+            pass  # le composite est un bonus, pas bloquant pour la relecture des rendus individuels
+
+    with db() as con:
+        sets = ",".join(f"{k}=?" for k in updates)
+        con.execute(f"UPDATE studio_pairs SET {sets} WHERE id=?", (*updates.values(), pair["id"]))
+
+
+def _run_studio_job(job_id: str) -> None:
+    with db() as con:
+        pairs = [dict(r) for r in con.execute(
+            "SELECT * FROM studio_pairs WHERE job_id=? ORDER BY sort_order", (job_id,)
+        )]
+    for pair in pairs:
+        try:
+            _process_studio_pair(pair)
+        except Exception:
+            with db() as con:
+                con.execute("UPDATE studio_pairs SET status='error' WHERE id=?", (pair["id"],))
+        with db() as con:
+            con.execute("UPDATE studio_jobs SET processed = processed + 1 WHERE id=?", (job_id,))
+    with db() as con:
+        con.execute("UPDATE studio_jobs SET status='done' WHERE id=?", (job_id,))
+
+
+def _purge_studio() -> None:
+    """Rendus (et bruts) jamais rattachés, plus vieux que 30 jours — sinon le
+    volume se remplit sans qu'on s'en rende compte. Déclenché paresseusement
+    (pas de scheduler dans ce projet), à chaque ouverture de la liste."""
+    cutoff = (datetime.now() - timedelta(days=STUDIO_PURGE_DAYS)).isoformat(timespec="seconds")
+    with db() as con:
+        old = [dict(r) for r in con.execute(
+            "SELECT id FROM studio_pairs WHERE attached_at IS NULL AND created_at < ?", (cutoff,)
+        )]
+        con.execute("DELETE FROM studio_pairs WHERE attached_at IS NULL AND created_at < ?", (cutoff,))
+    for r in old:
+        _delete_studio_pair_files(r["id"])
+
+
+def _studio_pair_view(row: dict) -> dict:
+    d = dict(row)
+    for k in ("recto_quad_json", "verso_quad_json", "recto_render_json", "verso_render_json",
+              "composite_render_json", "label_render_json", "warnings_json"):
+        raw = d.pop(k)
+        d[k[:-5]] = json.loads(raw) if raw else None
+    base = f"/api/studio/pairs/{d['id']}/render"
+    d["urls"] = {}
+    for name, info in (("recto", d["recto_render"]), ("verso", d["verso_render"]),
+                        ("composite", d["composite_render"]), ("label", d["label_render"])):
+        if info:
+            # Même nom de fichier après une recomposition (fond/coins changés) :
+            # sans ce paramètre de version, le navigateur sert le rendu en
+            # cache et le changement n'apparaît jamais à l'écran.
+            v = info.get("jpg_bytes", 0)
+            d["urls"][name] = {"jpg": f"{base}/{name}.jpg?v={v}", "webp": f"{base}/{name}.webp?v={v}"}
+    return d
+
+
+@app.post("/api/studio/jobs")
+async def api_studio_create_job(kind: str = "carte", bg_mode: str = "aplat", bg_color: str = "noir",
+                                 files: list[UploadFile] = File(...)):
+    if kind not in ("carte", "slab"):
+        raise HTTPException(400, "type invalide")
+    if bg_mode not in photostudio_mod.COMPOSERS:
+        raise HTTPException(400, "mode de fond invalide")
+    if bg_color not in photostudio_mod.BG_COLORS:
+        bg_color = "noir"
+    if not files:
+        raise HTTPException(400, "aucune photo envoyée")
+    if len(files) > STUDIO_MAX_PHOTOS:
+        raise HTTPException(400, f"{STUDIO_MAX_PHOTOS} photos maximum par envoi")
+
+    job_id = nid()
+    now = datetime.now().isoformat(timespec="seconds")
+    # Appariement recto/verso par ordre d'envoi, deux à deux — réassociable
+    # à la main ensuite dans la grille de relecture.
+    pairs = []
+    i = 0
+    sort_order = 0
+    while i < len(files):
+        pairs.append((files[i], files[i + 1] if i + 1 < len(files) else None))
+        i += 2
+        sort_order += 1
+
+    with db() as con:
+        con.execute("INSERT INTO studio_jobs(id,kind,bg_mode,bg_color,status,total,processed,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)", (job_id, kind, bg_mode, bg_color, "processing", len(pairs), 0, now))
+        for idx, (recto_file, verso_file) in enumerate(pairs):
+            pair_id = nid()
+            recto_bytes = await recto_file.read()
+            recto_name = "recto_raw.bin"
+            (_studio_dir(STUDIO_RAW, pair_id) / recto_name).write_bytes(recto_bytes)
+            verso_name = None
+            if verso_file is not None:
+                verso_bytes = await verso_file.read()
+                verso_name = "verso_raw.bin"
+                (STUDIO_RAW / pair_id / verso_name).write_bytes(verso_bytes)
+            con.execute(
+                "INSERT INTO studio_pairs(id,job_id,sort_order,kind,bg_mode,bg_color,status,"
+                "recto_raw,verso_raw,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (pair_id, job_id, idx, kind, bg_mode, bg_color, "queued", recto_name, verso_name, now),
+            )
+
+    threading.Thread(target=_run_studio_job, args=(job_id,), daemon=True).start()
+    return {"job_id": job_id, "pairs": len(pairs)}
+
+
+@app.get("/api/studio/jobs")
+def api_studio_list_jobs():
+    _purge_studio()
+    with db() as con:
+        jobs = [dict(r) for r in con.execute("SELECT * FROM studio_jobs ORDER BY created_at DESC LIMIT 20")]
+    return {"jobs": jobs}
+
+
+@app.get("/api/studio/jobs/{job_id}")
+def api_studio_get_job(job_id: str):
+    with db() as con:
+        job = con.execute("SELECT * FROM studio_jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, "lot introuvable")
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM studio_pairs WHERE job_id=? ORDER BY sort_order", (job_id,)
+        )]
+    views = [_studio_pair_view(r) for r in rows]
+    # Confiance la plus faible en tête — c'est elle qu'il faut relire en premier.
+    def _min_conf(v):
+        cs = [c for c in (v.get("recto_confidence"), v.get("verso_confidence")) if c is not None]
+        return min(cs) if cs else 0.0
+    views.sort(key=lambda v: (v["status"] != "needs_review", _min_conf(v)))
+    return {"job": dict(job), "pairs": views}
+
+
+@app.put("/api/studio/pairs/{pid}/corners")
+def api_studio_edit_corners(pid: str, p: dict = Body(...)):
+    """Éditeur manuel : coins déplacés à la main sur la photo brute, aperçu
+    du redressement en direct côté client — ici on ne fait que reprendre le
+    redressement + la composition avec les coins fournis, confiance à 100%
+    (confirmé par l'œil humain, la meilleure confiance qui soit)."""
+    side = p.get("side")
+    quad = p.get("quad")
+    if side not in ("recto", "verso") or not isinstance(quad, list) or len(quad) != 4:
+        raise HTTPException(400, "paramètres invalides")
+    with db() as con:
+        pair = con.execute("SELECT * FROM studio_pairs WHERE id=?", (pid,)).fetchone()
+        if not pair:
+            raise HTTPException(404, "paire introuvable")
+        pair = dict(pair)
+    raw = pair.get(f"{side}_raw")
+    if not raw:
+        raise HTTPException(400, f"pas de photo côté {side}")
+    result = _process_studio_side(pid, pair["kind"], pair["bg_mode"], pair["bg_color"], raw, side, forced_quad=quad)
+    updates = {
+        f"{side}_quad_json": json.dumps(result["quad"]),
+        f"{side}_confidence": result["confidence"],
+        f"{side}_render_json": json.dumps(result["render"]),
+    }
+    if result["label_render"]:
+        updates["label_render_json"] = json.dumps(result["label_render"])
+    with db() as con:
+        confidences = []
+        for s in ("recto", "verso"):
+            v = updates.get(f"{s}_confidence", pair.get(f"{s}_confidence"))
+            if v is not None:
+                confidences.append(v)
+        updates["status"] = ("needs_review" if confidences and min(confidences) < photostudio_mod.CONFIDENCE_REVIEW_THRESHOLD
+                              else "ready")
+        sets = ",".join(f"{k}=?" for k in updates)
+        con.execute(f"UPDATE studio_pairs SET {sets} WHERE id=?", (*updates.values(), pid))
+    return {"ok": True}
+
+
+@app.put("/api/studio/pairs/{pid}/background")
+def api_studio_change_background(pid: str, p: dict = Body(...)):
+    """Change le mode de fond d'une paire déjà détourée : recompose à partir
+    des coins déjà connus, pas besoin de redétecter."""
+    bg_mode = p.get("bg_mode")
+    bg_color = p.get("bg_color") or "noir"
+    if bg_mode not in photostudio_mod.COMPOSERS:
+        raise HTTPException(400, "mode de fond invalide")
+    with db() as con:
+        pair = con.execute("SELECT * FROM studio_pairs WHERE id=?", (pid,)).fetchone()
+        if not pair:
+            raise HTTPException(404, "paire introuvable")
+        pair = dict(pair)
+
+    updates: dict[str, Any] = {"bg_mode": bg_mode, "bg_color": bg_color}
+    warnings: list[str] = []
+    for side in ("recto", "verso"):
+        raw = pair.get(f"{side}_raw")
+        quad_json = pair.get(f"{side}_quad_json")
+        if not raw or not quad_json:
+            continue
+        result = _process_studio_side(pid, pair["kind"], bg_mode, bg_color, raw, side,
+                                       forced_quad=json.loads(quad_json))
+        updates[f"{side}_render_json"] = json.dumps(result["render"])
+        warnings.extend(result["warnings"])
+        if result["label_render"]:
+            updates["label_render_json"] = json.dumps(result["label_render"])
+    updates["warnings_json"] = json.dumps(warnings)
+
+    if pair.get("recto_raw") and pair.get("verso_raw"):
+        try:
+            recto_bgr = cv2.imread(str(STUDIO_RENDERS / pid / "recto.jpg"))
+            verso_bgr = cv2.imread(str(STUDIO_RENDERS / pid / "verso.jpg"))
+            h = min(recto_bgr.shape[0], verso_bgr.shape[0])
+            def _fit(img):
+                w = int(img.shape[1] * h / img.shape[0])
+                return cv2.resize(img, (w, h))
+            side_by_side = np.hstack([_fit(recto_bgr), _fit(verso_bgr)])
+            comp_render = _save_studio_render(pid, "composite", cv2.cvtColor(side_by_side, cv2.COLOR_BGR2RGB))
+            updates["composite_render_json"] = json.dumps(comp_render)
+            del recto_bgr, verso_bgr, side_by_side
+        except Exception:
+            pass
+
+    with db() as con:
+        sets = ",".join(f"{k}=?" for k in updates)
+        con.execute(f"UPDATE studio_pairs SET {sets} WHERE id=?", (*updates.values(), pid))
+    return {"ok": True, "warnings": warnings}
+
+
+@app.post("/api/studio/pairs/{pid}/discard")
+def api_studio_discard_pair(pid: str):
+    with db() as con:
+        cur = con.execute("DELETE FROM studio_pairs WHERE id=?", (pid,))
+        if not cur.rowcount:
+            raise HTTPException(404, "paire introuvable")
+    _delete_studio_pair_files(pid)
+    return {"ok": True}
+
+
+@app.put("/api/studio/pairs/{pid}/sides")
+def api_studio_reassign_sides(pid: str, p: dict = Body(...)):
+    """Réassociation manuelle recto/verso : échange le fichier brut d'un
+    côté avec celui d'une autre paire du même lot (l'appariement par défaut,
+    par ordre d'envoi, se trompe parfois)."""
+    other_pid = p.get("other_pair_id")
+    side = p.get("side")
+    other_side = p.get("other_side")
+    if side not in ("recto", "verso") or other_side not in ("recto", "verso") or not other_pid:
+        raise HTTPException(400, "paramètres invalides")
+    with db() as con:
+        a = con.execute("SELECT * FROM studio_pairs WHERE id=?", (pid,)).fetchone()
+        b = con.execute("SELECT * FROM studio_pairs WHERE id=?", (other_pid,)).fetchone()
+        if not a or not b:
+            raise HTTPException(404, "paire introuvable")
+        a, b = dict(a), dict(b)
+        if a["job_id"] != b["job_id"]:
+            raise HTTPException(400, "les deux paires doivent venir du même lot")
+        con.execute(f"UPDATE studio_pairs SET {side}_raw=?, {side}_quad_json=NULL, {side}_confidence=NULL, "
+                    f"{side}_render_json=NULL, status='queued' WHERE id=?", (b[f"{other_side}_raw"], pid))
+        con.execute(f"UPDATE studio_pairs SET {other_side}_raw=?, {other_side}_quad_json=NULL, "
+                    f"{other_side}_confidence=NULL, {other_side}_render_json=NULL, status='queued' WHERE id=?",
+                    (a[f"{side}_raw"], other_pid))
+    # Retraitement immédiat des deux paires modifiées (rapide, un ou deux côtés).
+    for reprocess_id in (pid, other_pid):
+        with db() as con:
+            pr = dict(con.execute("SELECT * FROM studio_pairs WHERE id=?", (reprocess_id,)).fetchone())
+        _process_studio_pair(pr)
+    return {"ok": True}
+
+
+@app.get("/api/studio/pairs/{pid}/render/{filename}")
+def api_studio_get_render(pid: str, filename: str):
+    stem = filename.split(".")[0]
+    if "/" in filename or ".." in filename or stem not in ("recto", "verso", "composite", "label"):
+        raise HTTPException(400, "nom de fichier invalide")
+    path = STUDIO_RENDERS / pid / filename
+    if not path.exists():
+        raise HTTPException(404, "rendu introuvable")
+    media_type = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+    return FileResponse(path, media_type=media_type)
+
+
+@app.get("/api/studio/pairs/{pid}/raw/{side}")
+def api_studio_get_raw(pid: str, side: str):
+    """Sert le brut décodé (JPEG) pour l'éditeur de coins — jamais le fichier
+    tel quel : il peut être en HEIC, illisible par un <img> de navigateur.
+    Mêmes dimensions que celles utilisées par la détection/le redressement,
+    pour que les coordonnées cliquées côté client retombent juste."""
+    if side not in ("recto", "verso"):
+        raise HTTPException(400, "côté invalide")
+    with db() as con:
+        pair = con.execute("SELECT * FROM studio_pairs WHERE id=?", (pid,)).fetchone()
+    if not pair:
+        raise HTTPException(404, "paire introuvable")
+    raw_name = pair[f"{side}_raw"]
+    if not raw_name:
+        raise HTTPException(404, "pas de photo côté " + side)
+    raw_path = STUDIO_RAW / pid / raw_name
+    if not raw_path.exists():
+        raise HTTPException(404, "fichier introuvable")
+    bgr = photostudio_mod.decode_upload(raw_path.read_bytes())
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise HTTPException(500, "échec de l'encodage")
+    return Response(bytes(buf), media_type="image/jpeg")
+
+
+def _slug(name: str) -> str:
+    import re
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip().lower()).strip("-")
+    return s or "carte"
+
+
+@app.post("/api/studio/jobs/{job_id}/export")
+def api_studio_export_zip(job_id: str, p: dict = Body(...)):
+    pair_ids = p.get("pair_ids") or []
+    if not pair_ids:
+        raise HTTPException(400, "aucune sélection")
+    with db() as con:
+        rows = [dict(r) for r in con.execute(
+            f"SELECT * FROM studio_pairs WHERE job_id=? AND id IN ({','.join('?' * len(pair_ids))})",
+            (job_id, *pair_ids),
+        )]
+        cards_by_id = {r["id"]: r["name"] for r in con.execute("SELECT id, name FROM cards")}
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, row in enumerate(rows):
+            base_name = _slug(cards_by_id.get(row.get("card_id"), "") or f"carte-{i + 1}")
+            for variant in ("recto", "verso", "composite", "label"):
+                render_json = row.get(f"{variant}_render_json")
+                if not render_json:
+                    continue
+                d = STUDIO_RENDERS / row["id"]
+                for ext in ("jpg", "webp"):
+                    fp = d / f"{variant}.{ext}"
+                    if fp.exists():
+                        zf.write(fp, f"{base_name}_{variant}.{ext}")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                              headers={"Content-Disposition": f'attachment; filename="studio-{job_id}.zip"'})
+
+
+@app.post("/api/studio/pairs/{pid}/attach")
+def api_studio_attach(pid: str, p: dict = Body(...)):
+    """Rattache les rendus au stock ou à une fiche — réutilise le pipeline
+    de photo existant (media.py) plutôt que d'inventer un second mécanisme
+    de stockage : le rendu recto devient LA photo de l'exemplaire ciblé."""
+    card_id = p.get("card_id")
+    stock_id = p.get("stock_id")
+    if not card_id and not stock_id:
+        raise HTTPException(400, "précise card_id ou stock_id")
+    with db() as con:
+        pair = con.execute("SELECT * FROM studio_pairs WHERE id=?", (pid,)).fetchone()
+        if not pair:
+            raise HTTPException(404, "paire introuvable")
+        pair = dict(pair)
+    recto_path = STUDIO_RENDERS / pid / "recto.jpg"
+    if not recto_path.exists():
+        raise HTTPException(400, "pas de rendu recto à rattacher")
+    raw = recto_path.read_bytes()
+
+    if stock_id:
+        with db() as con:
+            if not con.execute("SELECT 1 FROM stock_items WHERE id=?", (stock_id,)).fetchone():
+                raise HTTPException(404, "ligne de stock introuvable")
+            old = con.execute("SELECT photo_id FROM stock_items WHERE id=?", (stock_id,)).fetchone()["photo_id"]
+        info = media_mod.save_photo(STOCK_MEDIA, stock_id, raw, "image/jpeg")
+        with db() as con:
+            con.execute("UPDATE stock_items SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? "
+                        "WHERE id=?", (info["id"], info["size_bytes"], info["width"], info["height"], stock_id))
+        if old:
+            media_mod.delete_photo(STOCK_MEDIA, stock_id, old)
+    if card_id:
+        with db() as con:
+            row = con.execute("SELECT photo_id FROM cards WHERE id=?", (card_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "carte introuvable")
+            old = row["photo_id"]
+        info = media_mod.save_photo(CARD_MEDIA, card_id, raw, "image/jpeg")
+        with db() as con:
+            con.execute("UPDATE cards SET photo_id=?, photo_size_bytes=?, photo_width=?, photo_height=? WHERE id=?",
+                        (info["id"], info["size_bytes"], info["width"], info["height"], card_id))
+        if old:
+            media_mod.delete_photo(CARD_MEDIA, card_id, old)
+
+    with db() as con:
+        con.execute("UPDATE studio_pairs SET card_id=?, stock_id=?, attached_at=? WHERE id=?",
+                    (card_id, stock_id, datetime.now().isoformat(timespec="seconds"), pid))
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- export
