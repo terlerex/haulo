@@ -353,22 +353,24 @@ def allocate_lines(lines: list[dict], order_total_extra: float, split_mode: str)
     return _round_alloc(round(order_total_extra, 2), weights)
 
 
-def build_import_order_view(order: dict, lines: list[dict], settings: dict,
-                             fx_rate: float | None) -> dict:
-    """Vue complète d'une commande d'import : totaux + détail par ligne. Les
-    montants "reçus" (order.received_*) écrasent les montants estimés dans le
-    calcul final si présents (recalcul post-réception, delta affiché à part)."""
-    rate = order.get("fx_rate") or fx_rate
-    spread = order.get("fx_spread_pct")
-    spread = settings["fx_spread_pct"] if spread is None else float(spread)
+def _order_override(order: dict, key: str, fallback):
+    """order.get(k, default) ne retombe PAS sur `default` quand la clé existe en
+    base avec une valeur NULL (colonnes nullable) : vérification explicite."""
+    v = order.get(key)
+    return v if v is not None else fallback
 
+
+def _compute_order_pass(lines: list[dict], order: dict, settings: dict, rate: float | None,
+                         spread: float, duty_eur: float | None, vat_eur: float | None,
+                         dossier_eur: float | None, intl_eur: float | None) -> dict:
+    """Un calcul complet (conversion des lignes, frais, cascade fiscale,
+    répartition par ligne cent-exacte) pour un jeu de paramètres donné. Appelé
+    deux fois par build_import_order_view : une fois en pur théorique (taux
+    ECB + spread des réglages, aucun montant reçu) pour servir de référence de
+    comparaison, une fois avec les montants réellement facturés si la commande
+    est reçue — c'est cette seconde passe qui sert de résultat final."""
     enriched = []
     total_articles_eur = 0.0
-    # Montant total réellement exprimé en ¥ (lignes ¥ + frais ¥ de la commande) :
-    # sert de base au taux de change EFFECTIF (débit réel / ce montant), donc ne
-    # doit JAMAIS inclure une ligne saisie directement en € (montant réel, pas
-    # une conversion — il ne "consomme" aucun yen au taux de la commande).
-    jpy_paid_total = 0.0
     for l in lines:
         currency = "EUR" if (l.get("unit_currency") or "JPY").upper() == "EUR" else "JPY"
         if currency == "EUR":
@@ -378,7 +380,6 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
         else:
             unit_price_jpy = float(l.get("unit_price_jpy") or 0)
             unit_eur = convert_jpy(unit_price_jpy, rate, spread) if rate else 0.0
-            jpy_paid_total += unit_price_jpy * int(l["qty"])
         enriched.append({**l, "unit_currency": currency, "unit_price_eur": round(unit_eur, 4)})
         total_articles_eur += unit_eur * int(l["qty"])
 
@@ -394,11 +395,13 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
     fee_intl_jpy = float(order.get("fee_intl_shipping_jpy") or 0)
     fee_domestic = convert_jpy(fee_domestic_jpy, rate, spread) if rate else 0.0
     fee_consolidation = convert_jpy(fee_consolidation_jpy, rate, spread) if rate else 0.0
-    fee_intl = convert_jpy(fee_intl_jpy, rate, spread) if rate else 0.0
+    # Port international : la facture réelle en € (transporteur), quand connue,
+    # prime toujours sur une conversion JPY->EUR estimée — ce n'est plus une
+    # estimation à ce stade, c'est un montant constaté.
+    fee_intl = float(intl_eur) if intl_eur is not None else (convert_jpy(fee_intl_jpy, rate, spread) if rate else 0.0)
     fee_proxy_fixed_total_jpy = fee_proxy_fixed_jpy * n_orders
     fee_proxy_fixed = convert_jpy(fee_proxy_fixed_total_jpy, rate, spread) if rate else 0.0
     fee_payment_pct = float(order.get("fee_payment_pct") if order.get("fee_payment_pct") is not None else 0)
-    jpy_paid_total += fee_domestic_jpy + fee_consolidation_jpy + fee_intl_jpy + fee_proxy_fixed_total_jpy
 
     proxy_commission_eur = total_articles_eur * fee_proxy / 100 + fee_proxy_fixed
     payment_fee_eur = (total_articles_eur + fee_domestic + fee_consolidation + fee_intl) * fee_payment_pct / 100
@@ -409,35 +412,27 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
 
     valeur_douane = total_articles_eur + fee_intl
     ip = order.get("import_params") or settings["import"]
-    # order.get(k, default) ne retombe PAS sur `default` quand la clé existe en
-    # base avec une valeur NULL (colonnes nullable) : vérification explicite.
-    def _override(key, fallback):
-        v = order.get(key)
-        return v if v is not None else fallback
-    duty_rate = _override("duty_rate_pct", ip.get("duty_rate", 0))
-    vat_rate = _override("vat_rate_pct", ip.get("vat_rate", 0))
-    carrier_fee = _override("carrier_fee_eur", ip.get("carrier_fee", 0))
+    duty_rate = _order_override(order, "duty_rate_pct", ip.get("duty_rate", 0))
+    vat_rate = _order_override(order, "vat_rate_pct", ip.get("vat_rate", 0))
+    carrier_fee = _order_override(order, "carrier_fee_eur", ip.get("carrier_fee", 0))
     ioss = bool(order.get("ioss_enabled"))
 
-    use_received = order.get("status") == "recue" and order.get("received_duty_eur") is not None
-    if use_received:
+    if duty_eur is not None:
         cascade = {
             "valeur_douane": round(valeur_douane, 2),
-            "duty": round(float(order.get("received_duty_eur") or 0), 2),
+            "duty": round(float(duty_eur or 0), 2),
             "base_tva": None,
-            "vat": round(float(order.get("received_vat_eur") or 0), 2),
-            "dossier": round(float(order.get("received_carrier_fee_eur") or 0), 2),
+            "vat": round(float(vat_eur or 0), 2),
+            "dossier": round(float(dossier_eur or 0), 2),
         }
         cascade["total"] = round(valeur_douane + cascade["duty"] + cascade["vat"] + cascade["dossier"], 2)
     else:
         cascade = tax_cascade(valeur_douane, float(duty_rate or 0), float(vat_rate or 0),
                                float(carrier_fee or 0), ioss)
 
-    order_total_extra = fee_intl + cascade["duty"] + cascade["vat"] + cascade["dossier"] + service_fees - fee_intl
-    # fee_intl est déjà DANS valeur_douane (donc dans le total ci-dessus) : on
-    # répartit tout ce qui n'est pas la valeur article elle-même.
-    total_extra_to_allocate = (cascade["duty"] + cascade["vat"] + cascade["dossier"]
-                                + service_fees + fee_intl)
+    # fee_intl est déjà DANS valeur_douane : on répartit tout ce qui n'est pas
+    # la valeur article elle-même (taxes + tous les frais de service + port intl).
+    total_extra_to_allocate = cascade["duty"] + cascade["vat"] + cascade["dossier"] + service_fees + fee_intl
 
     # Répartition en deux temps, chacun cent-exact (_round_alloc) : la valeur
     # article elle-même (déjà connue par ligne mais re-arrondie proprement)
@@ -446,47 +441,69 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
     article_weights = [l["unit_price_eur"] * int(l["qty"]) for l in enriched]
     article_alloc = _round_alloc(round(total_articles_eur, 2), article_weights)
     alloc = allocate_lines(enriched, total_extra_to_allocate, order.get("split_mode") or "value")
-    sell_fees = settings["sell_fees"]
-    line_rows = []
+
+    lines_out = []
     for l, article_total, extra in zip(enriched, article_alloc, alloc):
         qty = int(l["qty"])
         line_total = round(article_total + extra, 2)
         unit_landed = round(line_total / qty, 2) if qty else 0.0
-        target = l.get("resale_target_eur")
-        row = {**l, "article_total": article_total, "landed_extra_total": round(extra, 2),
-               "landed_total": line_total, "unit_landed_cost": unit_landed}
-        if target:
-            sf = sell_fees.get(l.get("resale_platform") or "", {})
-            net = net_from_resale(float(target), sf, 0.0)["net"]
-            profit_unit = net - unit_landed
-            profit_total_line = round(net * qty - line_total, 2)  # exact (base landed_total, pas unit arrondi x qty)
-            row["net_after_fees"] = round(net, 2)
-            row["profit_unit"] = round(profit_unit, 2)
-            row["profit_pct"] = round(profit_unit / unit_landed * 100, 1) if unit_landed else None
-            row["profit_total"] = profit_total_line
-        else:
-            row["net_after_fees"] = row["profit_unit"] = row["profit_pct"] = row["profit_total"] = None
-        line_rows.append(row)
-
-    line_rows.sort(key=lambda r: (r["profit_pct"] is None, -(r["profit_pct"] or 0)))
+        lines_out.append({**l, "article_total": article_total, "landed_extra_total": round(extra, 2),
+                           "landed_total": line_total, "unit_landed_cost": unit_landed})
 
     # Reconstruit depuis les MÊMES totaux arrondis que ceux passés à _round_alloc
-    # pour la répartition par ligne (round(total_articles_eur,2) et
-    # round(total_extra_to_allocate,2)) — pas depuis les valeurs brutes non
-    # arrondies, sinon un centime peut se perdre entre "arrondir la somme" et
-    # "sommer les arrondis" et grand_total_eur ne correspond plus à sum_check.
+    # pour la répartition par ligne, pas depuis les valeurs brutes non arrondies,
+    # sinon un centime peut se perdre entre "arrondir la somme" et "sommer les
+    # arrondis" et grand_total_eur ne correspond plus à sum_check.
     grand_total = round(total_articles_eur, 2) + round(total_extra_to_allocate, 2)
-    resale_total = sum(r["net_after_fees"] or 0 for r in line_rows)
-    profit_total = sum(r["profit_total"] or 0 for r in line_rows)
-    low_threshold = _override("low_margin_alert_pct", settings["low_margin_alert_pct"])
-    n_flagged = sum(1 for r in line_rows if r["profit_pct"] is not None and r["profit_pct"] < low_threshold)
+    return {
+        "lines": lines_out, "total_articles_eur": round(total_articles_eur, 2),
+        "service_fees": {"proxy_commission": round(proxy_commission_eur, 2),
+                          "domestic_shipping": round(fee_domestic, 2),
+                          "consolidation": round(fee_consolidation, 2),
+                          "intl_shipping": round(fee_intl, 2),
+                          "payment_fee": round(payment_fee_eur, 2)},
+        "cascade": cascade,
+        "grand_total_eur": round(grand_total, 2),
+    }
+
+
+def build_import_order_view(order: dict, lines: list[dict], settings: dict,
+                             fx_rate: float | None) -> dict:
+    """Vue complète d'une commande d'import : totaux + détail par ligne.
+
+    Tant que la commande n'est pas reçue, tout est estimé (taux ECB + spread
+    théorique des réglages). Une fois "reçue", les montants réellement
+    facturés (order.received_*) remplacent entièrement l'estimation dans le
+    calcul final — coût de revient par ligne, bénéfice, marges — et l'écart
+    estimé/réel reste visible à part (order_gap_*, lines[].gap_*), jamais
+    mélangé silencieusement avec le résultat final."""
+    rate = order.get("fx_rate") or fx_rate
+    spread = order.get("fx_spread_pct")
+    spread = settings["fx_spread_pct"] if spread is None else float(spread)
+
+    # Montant total réellement exprimé en ¥ (lignes ¥ + frais ¥ de la commande) :
+    # indépendant du taux de change, sert de base au taux EFFECTIF (débit réel
+    # / ce montant). Ne doit JAMAIS inclure une ligne saisie directement en €
+    # (montant réel, pas une conversion — elle ne "consomme" aucun yen).
+    jpy_paid_total = 0.0
+    for l in lines:
+        currency = "EUR" if (l.get("unit_currency") or "JPY").upper() == "EUR" else "JPY"
+        if currency != "EUR":
+            jpy_paid_total += float(l.get("unit_price_jpy") or 0) * int(l.get("qty") or 1)
+    fee_domestic_jpy = float(order.get("fee_domestic_jpy") or 0)
+    fee_consolidation_jpy = float(order.get("fee_consolidation_jpy") or 0)
+    fee_intl_jpy = float(order.get("fee_intl_shipping_jpy") or 0)
+    n_orders = max(1, int(order.get("n_orders") or 1))
+    fee_proxy_fixed_total_jpy = float(order.get("fee_proxy_fixed_jpy") or 0) * n_orders
+    jpy_paid_total += fee_domestic_jpy + fee_consolidation_jpy + fee_intl_jpy + fee_proxy_fixed_total_jpy
 
     # Taux de change effectif : comparaison entre ce que le taux théorique
     # (ECB brut) + spread supposé auraient donné, et ce qui a été RÉELLEMENT
-    # débité en € pour la part de la commande exprimée en ¥ (lignes ¥ + frais
-    # ¥). Les lignes saisies directement en € ne participent à aucun taux :
-    # elles ne sont pas dans jpy_paid_total.
+    # débité en € pour la part ¥ de la commande. Si connu, ce taux effectif
+    # remplace le taux théorique dans le recalcul "reçue" ci-dessous — c'est
+    # la conversion la plus fidèle possible, spread réel inclus.
     debit_check = None
+    effective_rate = None
     received_debit = order.get("received_debit_eur")
     if received_debit not in (None, "") and jpy_paid_total > 0:
         received_debit = float(received_debit)
@@ -500,24 +517,114 @@ def build_import_order_view(order: dict, lines: list[dict], settings: dict,
             "effective_spread_pct": round((effective_rate / rate - 1) * 100, 2) if rate else None,
         }
 
+    baseline = _compute_order_pass(lines, order, settings, rate, spread, None, None, None, None)
+
+    is_received = order.get("status") == "recue"
+    using_received = False
+    real = baseline
+    if is_received:
+        has_detail = effective_rate is not None or any(
+            order.get(k) is not None for k in
+            ("received_duty_eur", "received_vat_eur", "received_carrier_fee_eur", "received_intl_shipping_eur")
+        )
+        if has_detail:
+            active_rate, active_spread = (effective_rate, 0.0) if effective_rate is not None else (rate, spread)
+            real = _compute_order_pass(
+                lines, order, settings, active_rate, active_spread,
+                order.get("received_duty_eur"), order.get("received_vat_eur"),
+                order.get("received_carrier_fee_eur"), order.get("received_intl_shipping_eur"),
+            )
+            using_received = True
+
+    # "Total réellement payé" : filet de secours quand le détail poste par
+    # poste n'est pas connu (ou pas complètement). Le total réel fait alors
+    # foi : l'écart entre lui et `real` (identique à `baseline` si aucun autre
+    # montant reçu n'est connu) est réparti au prorata de la valeur de chaque
+    # ligne, pour obtenir quand même un coût par carte juste et une somme des
+    # lignes qui reconstitue le total réel au centime près.
+    received_total = order.get("received_total_eur")
+    if is_received and received_total not in (None, ""):
+        received_total = round(float(received_total), 2)
+        residual = round(received_total - real["grand_total_eur"], 2)
+        if residual != 0 and real["lines"]:
+            weights = [r["unit_price_eur"] * int(r["qty"]) for r in real["lines"]]
+            if not any(weights):
+                weights = [1.0] * len(real["lines"])
+            corr = _round_alloc(residual, weights)
+            new_lines = []
+            for r, c in zip(real["lines"], corr):
+                qty = int(r["qty"])
+                new_total = round(r["landed_total"] + c, 2)
+                new_lines.append({**r, "landed_extra_total": round(r["landed_extra_total"] + c, 2),
+                                   "landed_total": new_total,
+                                   "unit_landed_cost": round(new_total / qty, 2) if qty else 0.0})
+            real = {**real, "lines": new_lines, "grand_total_eur": received_total}
+        else:
+            real = {**real, "grand_total_eur": received_total}
+        using_received = True
+
+    baseline_by_id = {l.get("id"): l for l in baseline["lines"]}
+    sell_fees = settings["sell_fees"]
+    line_rows = []
+    for l in real["lines"]:
+        qty = int(l["qty"])
+        unit_landed = l["unit_landed_cost"]
+        base_l = baseline_by_id.get(l.get("id"))
+        gap_eur = round(l["landed_total"] - base_l["landed_total"], 2) if (using_received and base_l) else None
+        gap_pct = (round(gap_eur / base_l["landed_total"] * 100, 1)
+                   if (gap_eur is not None and base_l and base_l["landed_total"]) else None)
+        target = l.get("resale_target_eur")
+        row = {**l, "estimated_landed_total": base_l["landed_total"] if (using_received and base_l) else None,
+               "gap_eur": gap_eur, "gap_pct": gap_pct}
+        if target:
+            sf = sell_fees.get(l.get("resale_platform") or "", {})
+            net = net_from_resale(float(target), sf, 0.0)["net"]
+            profit_unit = net - unit_landed
+            profit_total_line = round(net * qty - l["landed_total"], 2)  # exact (base landed_total, pas unit arrondi x qty)
+            row["net_after_fees"] = round(net, 2)
+            row["profit_unit"] = round(profit_unit, 2)
+            row["profit_pct"] = round(profit_unit / unit_landed * 100, 1) if unit_landed else None
+            row["profit_total"] = profit_total_line
+            # Valeur brute si revendu au prix affiché (avant frais de plateforme),
+            # à afficher à côté du bénéfice net — les deux racontent des histoires
+            # différentes : "ce que ça vaut" vs "ce qu'il en reste après frais".
+            row["gross_resale_total"] = round(float(target) * qty, 2)
+        else:
+            row["net_after_fees"] = row["profit_unit"] = row["profit_pct"] = row["profit_total"] = None
+            row["gross_resale_total"] = None
+        line_rows.append(row)
+
+    line_rows.sort(key=lambda r: (r["profit_pct"] is None, -(r["profit_pct"] or 0)))
+
+    grand_total = real["grand_total_eur"]
+    resale_total = sum(r["net_after_fees"] or 0 for r in line_rows)
+    profit_total = sum(r["profit_total"] or 0 for r in line_rows)
+    gross_resale_total = sum(r["gross_resale_total"] or 0 for r in line_rows)
+    low_threshold = _order_override(order, "low_margin_alert_pct", settings["low_margin_alert_pct"])
+    n_flagged = sum(1 for r in line_rows if r["profit_pct"] is not None and r["profit_pct"] < low_threshold)
+
+    order_gap_eur = round(grand_total - baseline["grand_total_eur"], 2) if using_received else None
+    order_gap_pct = (round(order_gap_eur / baseline["grand_total_eur"] * 100, 1)
+                      if (order_gap_eur is not None and baseline["grand_total_eur"]) else None)
+
     return {
         "fx_rate": rate, "fx_spread_pct": spread,
-        "total_articles_eur": round(total_articles_eur, 2),
-        "service_fees": {"proxy_commission": round(proxy_commission_eur, 2),
-                          "domestic_shipping": round(fee_domestic, 2),
-                          "consolidation": round(fee_consolidation, 2),
-                          "intl_shipping": round(fee_intl, 2),
-                          "payment_fee": round(payment_fee_eur, 2)},
-        "cascade": cascade,
+        "total_articles_eur": real["total_articles_eur"],
+        "service_fees": real["service_fees"],
+        "cascade": real["cascade"],
         "grand_total_eur": round(grand_total, 2),
         "resale_total_eur": round(resale_total, 2),
+        "gross_resale_total_eur": round(gross_resale_total, 2),
         "profit_total_eur": round(profit_total, 2),
         "margin_pct": round(profit_total / grand_total * 100, 1) if grand_total else None,
         "n_flagged": n_flagged,
         "low_margin_alert_pct": low_threshold,
         "lines": line_rows,
-        "using_received_amounts": use_received,
+        "using_received_amounts": using_received,
         "sum_check": round(sum(r["landed_total"] for r in line_rows), 2),
         "jpy_paid_total": round(jpy_paid_total, 0),
         "debit_check": debit_check,
+        "estimated_grand_total_eur": round(baseline["grand_total_eur"], 2) if using_received else None,
+        "order_gap_eur": order_gap_eur,
+        "order_gap_pct": order_gap_pct,
     }

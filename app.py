@@ -357,6 +357,15 @@ def migrate(con: sqlite3.Connection) -> None:
             # saisi a posteriori (relevé bancaire) pour calculer le taux de
             # change effectif obtenu, spread compris.
             "received_debit_eur": "REAL",
+            # Port international réellement facturé (€) — remplace la conversion
+            # JPY->EUR estimée dans la valeur en douane quand connu (facture
+            # transporteur en €, pas une reconversion).
+            "received_intl_shipping_eur": "REAL",
+            # "Total réellement payé" : filet de secours quand le détail poste
+            # par poste (droits/TVA/port/débit ¥) n'est pas connu. L'écart avec
+            # l'estimation théorique est alors réparti au prorata de la valeur
+            # de chaque ligne, pour obtenir quand même un coût par carte juste.
+            "received_total_eur": "REAL",
             # Forfait fixe du proxy, ¥ par commande (ex. Buyee facture 500¥
             # par commande quel que soit le montant — un % seul ne le modélise
             # pas). Multiplié par n_orders si plusieurs commandes/enchères
@@ -1789,15 +1798,21 @@ def api_set_order_debit(oid: str, p: dict = Body(...)):
 
 @app.post("/api/import-orders/{oid}/receive")
 def api_receive_order(oid: str, p: dict = Body(...)):
-    """Saisie des montants réellement facturés à réception (taxes, frais de
-    dossier) : le coût de revient est recalculé sur ces montants réels côté
-    build_import_order_view, l'écart estimé/réel reste visible (computed)."""
+    """Saisie des montants réellement facturés à réception (port international,
+    droits, TVA, frais de dossier) : le coût de revient est recalculé
+    ENTIÈREMENT sur ces montants réels côté build_import_order_view (par ligne
+    et au total), l'écart estimé/réel reste visible (computed.order_gap_*,
+    computed.lines[].gap_*). Rappelable à volonté une fois la commande reçue
+    (pas seulement au premier passage) pour corriger une saisie."""
+    def numopt(k):
+        v = p.get(k)
+        return max(0.0, float(v)) if v not in (None, "") else None
     with db() as con:
         cur = con.execute(
             "UPDATE import_orders SET status='recue', received_duty_eur=?, received_vat_eur=?, "
-            "received_carrier_fee_eur=? WHERE id=?",
-            (float(p.get("received_duty_eur") or 0), float(p.get("received_vat_eur") or 0),
-             float(p.get("received_carrier_fee_eur") or 0), oid),
+            "received_carrier_fee_eur=?, received_intl_shipping_eur=?, received_total_eur=? WHERE id=?",
+            (numopt("received_duty_eur"), numopt("received_vat_eur"), numopt("received_carrier_fee_eur"),
+             numopt("received_intl_shipping_eur"), numopt("received_total_eur"), oid),
         )
         if not cur.rowcount:
             raise HTTPException(404, "commande introuvable")
@@ -3057,13 +3072,13 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute(
                 f"INSERT OR REPLACE INTO import_orders(id,{','.join(IMPORT_ORDER_FIELDS)},"
                 "status,fx_rate,fx_rate_at,received_duty_eur,received_vat_eur,received_carrier_fee_eur,"
-                "received_debit_eur,created_at) "
-                f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?,?,?,?,?,?,?,?)",
+                "received_debit_eur,received_intl_shipping_eur,received_total_eur,created_at) "
+                f"VALUES(?,{','.join('?' * len(IMPORT_ORDER_FIELDS))},?,?,?,?,?,?,?,?,?,?)",
                 (oid, *[iod[f] for f in IMPORT_ORDER_FIELDS],
                  io_.get("status") if io_.get("status") in ("brouillon", "commandee", "recue") else "brouillon",
                  io_.get("fx_rate"), io_.get("fx_rate_at"),
                  io_.get("received_duty_eur"), io_.get("received_vat_eur"), io_.get("received_carrier_fee_eur"),
-                 io_.get("received_debit_eur"),
+                 io_.get("received_debit_eur"), io_.get("received_intl_shipping_eur"), io_.get("received_total_eur"),
                  str(io_.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for i, ln in enumerate(io_.get("lines") or []):

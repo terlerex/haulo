@@ -982,8 +982,10 @@ function lineAmountLabel(l){
 
 function orderLineRow(l, order){
   const flagged = l.profit_pct!=null && l.profit_pct < order.computed.low_margin_alert_pct;
+  const gapTxt = l.gap_eur!=null ? `<br><span class="dim" style="font-size:11px">estimé ${eur(l.estimated_landed_total)} → réel ${eur(l.landed_total)} · écart ${eur(l.gap_eur)}${l.gap_pct!=null?` (${pct(l.gap_pct)})`:""}</span>` : "";
+  const grossTxt = l.gross_resale_total!=null ? `<br><span class="dim" style="font-size:11px">valeur si revendu au prix affiché : ${eur(l.gross_resale_total)}</span>` : "";
   return `<div class="comp" style="grid-template-columns:1fr auto auto auto">
-      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${lineAmountLabel(l)} · coût ${eur(l.unit_landed_cost)}</span></span>
+      <span>${esc(l.name)}${l.qty>1?` × ${l.qty}`:""}<br><span class="dim" style="font-size:11px">${lineAmountLabel(l)} · coût ${eur(l.unit_landed_cost)}</span>${gapTxt}${grossTxt}</span>
       <span class="p">${eur(l.unit_landed_cost)}</span>
       <span class="${l.profit_pct==null?'dim':flagged?'loss':'gain'}" style="font-size:12px">${l.profit_pct!=null?pct(l.profit_pct):"—"}</span>
       <span>
@@ -1034,13 +1036,23 @@ function debitCheckBlock(o){
 }
 
 function receiveBlock(o){
-  return `<span class="eyebrow">Réception — montants réellement facturés</span>
+  const c = o.computed;
+  const gapNote = o.status==="recue" && c.using_received_amounts
+    ? `<p class="note">Total estimé avant réception : ${eur(c.estimated_grand_total_eur)} · écart ${eur(c.order_gap_eur)}${c.order_gap_pct!=null?` (${pct(c.order_gap_pct)})`:""}.</p>` : "";
+  return `<span class="eyebrow">${o.status==="recue"?"Réception — montants réellement facturés (modifiable)":"Réception — montants réellement facturés"}</span>
+    <p class="note" style="margin-top:4px">Laisse un champ vide si tu ne le connais pas — seuls les montants renseignés remplacent l'estimation.</p>
     <div class="f3" style="margin:8px 0 10px">
-      <label><span class="lb">Droits payés (€)</span><input id="rc-duty" type="number" min="0" step="0.01" value="0"></label>
-      <label><span class="lb">TVA payée (€)</span><input id="rc-vat" type="number" min="0" step="0.01" value="0"></label>
-      <label><span class="lb">Frais de dossier payés (€)</span><input id="rc-carrier" type="number" min="0" step="0.01" value="0"></label>
+      <label><span class="lb">Port international réel (€)</span><input id="rc-intl" type="number" min="0" step="0.01" value="${o.received_intl_shipping_eur??""}"></label>
+      <label><span class="lb">Droits payés (€)</span><input id="rc-duty" type="number" min="0" step="0.01" value="${o.received_duty_eur??""}"></label>
+      <label><span class="lb">TVA payée (€)</span><input id="rc-vat" type="number" min="0" step="0.01" value="${o.received_vat_eur??""}"></label>
     </div>
-    <button class="btn primary" data-receive-order="${o.id}" style="width:100%">Valider la réception</button>`;
+    <div class="f2" style="margin:0 0 10px">
+      <label><span class="lb">Frais de dossier payés (€)</span><input id="rc-carrier" type="number" min="0" step="0.01" value="${o.received_carrier_fee_eur??""}"></label>
+      <label><span class="lb">Total réellement payé (€)</span><input id="rc-total" type="number" min="0" step="0.01" value="${o.received_total_eur??""}"></label>
+    </div>
+    <p class="note">Total réellement payé : si tu ne connais pas le détail poste par poste, laisse les champs ci-dessus vides et ne renseigne que celui-ci — l'écart est réparti au prorata de la valeur de chaque carte.</p>
+    ${gapNote}
+    <button class="btn primary" data-receive-order="${o.id}" style="width:100%">${o.status==="recue"?"Mettre à jour les montants réels":"Valider la réception"}</button>`;
 }
 
 function importOrderSheet(id){
@@ -1111,8 +1123,10 @@ function importOrderSheet(id){
       <div class="stat"><span class="eyebrow">Articles</span><div class="v">${eur(c.total_articles_eur)}</div></div>
       <div class="stat"><span class="eyebrow">Taxes + frais</span><div class="v">${eur(c.grand_total_eur-c.total_articles_eur)}</div></div>
       <div class="stat"><span class="eyebrow">Total commande</span><div class="v">${eur(c.grand_total_eur)}</div></div>
-      <div class="stat"><span class="eyebrow">Bénéfice estimé</span><div class="v ${c.profit_total_eur>=0?'gain':'loss'}">${eur(c.profit_total_eur)} · ${c.margin_pct!=null?pct(c.margin_pct):"—"}</div></div>
+      <div class="stat"><span class="eyebrow">${c.using_received_amounts?"Bénéfice réel":"Bénéfice estimé"}</span><div class="v ${c.profit_total_eur>=0?'gain':'loss'}">${eur(c.profit_total_eur)} · ${c.margin_pct!=null?pct(c.margin_pct):"—"}</div></div>
+      <div class="stat"><span class="eyebrow">Valeur si revendu au prix affiché</span><div class="v">${eur(c.gross_resale_total_eur)}</div></div>
     </div>
+    ${c.using_received_amounts && c.order_gap_eur!=null ? `<p class="note" style="margin-top:8px">Écart estimé/réel sur le total commande : ${eur(c.order_gap_eur)}${c.order_gap_pct!=null?` (${pct(c.order_gap_pct)})`:""} — estimation initiale ${eur(c.estimated_grand_total_eur)}.</p>` : ""}
     <details style="margin-top:10px"><summary class="eyebrow" style="cursor:pointer">Détail de la cascade fiscale</summary>
       <div style="margin-top:8px;font-size:13px">
         <div class="comp" style="grid-template-columns:1fr auto"><span>1. Valeur en douane (articles + port intl)</span><span class="p">${eur(c.cascade.valeur_douane)}</span></div>
@@ -1145,7 +1159,7 @@ function importOrderSheet(id){
 
     <hr class="sep">
     ${o.status==="brouillon" ? `<button class="btn primary" data-set-status="commandee" data-order="${o.id}" style="width:100%;margin-bottom:10px">Marquer commandée (fige le taux de change)</button>` : ""}
-    ${o.status==="commandee" ? receiveBlock(o) : ""}
+    ${(o.status==="commandee"||o.status==="recue") ? receiveBlock(o) : ""}
     ` : ""}
 
     <div class="actions">
@@ -1901,9 +1915,11 @@ document.addEventListener("click", async ev=>{
     const rco = t.closest("[data-receive-order]");
     if(rco){
       await api(`/api/import-orders/${rco.dataset.receiveOrder}/receive`,{method:"POST",json:{
-        received_duty_eur:document.getElementById("rc-duty").value||0,
-        received_vat_eur:document.getElementById("rc-vat").value||0,
-        received_carrier_fee_eur:document.getElementById("rc-carrier").value||0}});
+        received_intl_shipping_eur:document.getElementById("rc-intl").value||null,
+        received_duty_eur:document.getElementById("rc-duty").value||null,
+        received_vat_eur:document.getElementById("rc-vat").value||null,
+        received_carrier_fee_eur:document.getElementById("rc-carrier").value||null,
+        received_total_eur:document.getElementById("rc-total").value||null}});
       await Promise.all([loadCardDeals(), refresh()]); return importOrderSheet(rco.dataset.receiveOrder);
     }
     const addl = t.closest("[data-add-line]");
