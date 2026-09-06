@@ -1416,7 +1416,15 @@ function stockSheet(id){
         <option value="gradee" ${r?.type==="gradee"?"selected":""}>Gradée</option>
       </select></label>
     </div>
-    <label><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
+    <div class="f2">
+      <label><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
+      <label><span class="lb">Nom original</span><input id="st-nomalt" value="${esc(r?.nom_alternatif||"")}" placeholder="ピカチュウ"></label>
+    </div>
+    <div class="f3">
+      <label><span class="lb">N° de certification</span><input id="st-cert" value="${esc(r?.cert_number||"")}" placeholder="123456789"></label>
+      <label><span class="lb">Organisme</span><input id="st-certorg" value="${esc(r?.cert_organisme||"PSA")}"></label>
+      <label><span class="lb">Année de gradation</span><input id="st-certyear" value="${esc(r?.cert_year||"")}" placeholder="2024"></label>
+    </div>
     <div class="f3">
       <label><span class="lb">Coût de revient</span><input id="st-cost" type="number" min="0" step="0.01" value="${r?.cost_basis??""}"
         style="${r?.buy_over_max_eur?'color:var(--loss)':''}"></label>
@@ -1454,6 +1462,7 @@ function stockSheet(id){
     <div class="actions">
       ${r?`<button class="btn danger ghost" data-del-stock="${r.id}">Supprimer</button>`:""}
       ${r?`<button class="btn ghost" data-dup-stock="${r.id}" title="Créer d'autres exemplaires identiques (dates et statuts indépendants ensuite)">⧉ Dupliquer</button>`:""}
+      ${r?`<button class="btn" data-open-listing="${r.id}">📝 Générer l'annonce</button>`:""}
       ${r && r.status!=="conserve" && r.status!=="retourne" ? `
         <button class="btn ghost" data-stock-status="${r.id}" data-to-status="retourne">Retourné</button>
         <button class="btn ghost" data-stock-status="${r.id}" data-to-status="conserve">Garder (portefeuille)</button>` : ""}
@@ -1477,6 +1486,169 @@ function saleForm(sid){
     </div>
     <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
       <button class="btn primary" data-confirm-sale="${sid}">Marquer vendu</button></div>
+  `,"center");
+}
+
+/* ======================================================================= */
+/* Générateur d'annonces — gabarits déterministes, pas d'IA générative      */
+/* ======================================================================= */
+let listingSettingsCache = null;
+const LISTING_PLATFORM_LABELS = {vinted:"Vinted", ebay:"eBay"};
+const LISTING_STYLE_LABELS = {detaille:"Détaillé", court:"Court", chaleureux:"Chaleureux"};
+
+async function loadListingSettings(force){
+  if(!listingSettingsCache || force) listingSettingsCache = await api("/api/listing-settings");
+  return listingSettingsCache;
+}
+
+async function openListingSheet(stockId){
+  const settings = await loadListingSettings();
+  await loadStock();
+  const r = stockData.stock.find(x=>x.id===stockId);
+  if(!r) return;
+  const platform = r.listing_platform || settings.default_platform;
+  const style = r.listing_style || settings.default_style;
+  if(r.listing_title){
+    const limit = settings.platforms[platform]?.title_limit || 80;
+    renderListingSheet({kind:"stock", id:stockId, title:r.name}, platform, style, {
+      blocked:false, title:r.listing_title, description:r.listing_description,
+      title_length:r.listing_title.length, title_limit:limit, warnings:[],
+    }, settings);
+  } else {
+    renderListingSheet({kind:"stock", id:stockId, title:r.name}, platform, style, null, settings);
+    await listingGenerate({kind:"stock", id:stockId, title:r.name}, platform, style, false);
+  }
+}
+
+async function cardListingChooser(cid){
+  const c = await api("/api/cards/"+cid);
+  const stockEx = (c.exemplaires||[]).filter(e=>e.table==="stock_items");
+  if(stockEx.length===1) return openListingSheet(stockEx[0].id);
+  if(!stockEx.length) return openCardListingSheet(cid, c.name);
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Générer l'annonce</span><h2>Pour quel exemplaire ?</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">Le numéro de certification est propre à un exemplaire précis — choisis lequel.</p>
+    <div style="margin:8px 0">${stockEx.map(e=>`
+      <div class="comp" style="cursor:pointer" data-choose-listing-stock="${e.id}"><span>${esc(e.label||"")}</span><span class="dim">${esc(e.status||"")}</span></div>`).join("")}</div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn ghost" data-choose-listing-card="${cid}">Sans exemplaire précis</button></div>
+  `,"center");
+}
+
+async function openCardListingSheet(cid, cardName){
+  const settings = await loadListingSettings();
+  const ctx = {kind:"card", id:cid, title:cardName};
+  renderListingSheet(ctx, settings.default_platform, settings.default_style, null, settings);
+  await listingGenerate(ctx, settings.default_platform, settings.default_style, false);
+}
+
+async function listingGenerate(ctx, platform, style, force){
+  const path = ctx.kind==="stock" ? `/api/stock/${ctx.id}/listing/generate` : `/api/cards/${ctx.id}/listing/generate`;
+  const r = await api(path, {method:"POST", json:{platform, style, force}});
+  if(r.needs_confirm){
+    if(!confirm("Cette annonce a été modifiée à la main. Regénérer va écraser cette modification. Continuer ?")) {
+      // Refus : réaffiche la version déjà enregistrée, jamais un écran vide.
+      const settings = await loadListingSettings();
+      const item = stockData.stock.find(x=>x.id===ctx.id);
+      const limit = settings.platforms[platform]?.title_limit || 80;
+      const kept = item?.listing_title ? {
+        blocked:false, title:item.listing_title, description:item.listing_description,
+        title_length:item.listing_title.length, title_limit:limit, warnings:[],
+      } : null;
+      return renderListingSheet(ctx, platform, style, kept, settings);
+    }
+    return listingGenerate(ctx, platform, style, true);
+  }
+  if(ctx.kind==="stock") await loadStock();
+  renderListingSheet(ctx, platform, style, r, await loadListingSettings());
+}
+
+function renderListingSheet(ctx, platform, style, result, settings){
+  const limit = settings.platforms[platform]?.title_limit || 80;
+  const blocked = result?.blocked;
+  const title = result && !blocked ? result.title : "";
+  const desc = result && !blocked ? result.description : "";
+  const titleLen = result && !blocked ? result.title_length : 0;
+  const warnings = result && !blocked ? (result.warnings||[]) : [];
+  const pctUsed = limit ? titleLen/limit : 0;
+  const counterCls = pctUsed>1 ? "loss" : (pctUsed>=0.9 ? "loss" : "dim");
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Annonce</span><h2 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ctx.title||"")}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="f2">
+      <label><span class="lb">Plateforme</span><select id="lst-platform">
+        ${Object.entries(LISTING_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${platform===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+      <label><span class="lb">Style</span><select id="lst-style">
+        ${Object.entries(LISTING_STYLE_LABELS).map(([k,l])=>`<option value="${k}" ${style===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="btn primary" data-listing-generate data-listing-kind="${ctx.kind}" data-listing-id="${ctx.id}" data-listing-title="${esc(ctx.title||"")}">Générer l'annonce</button>
+    </div>
+    ${blocked ? `<div class="warn" style="margin-top:10px">🚫 ${esc(result.block_reason)}</div>` : ""}
+    ${warnings.map(w=>`<div class="warn" style="margin-top:8px">⚠ ${esc(w)}</div>`).join("")}
+    ${result && !blocked ? `
+    <hr class="sep">
+    <span class="eyebrow">Titre</span>
+    <textarea id="lst-title" rows="2" style="margin-top:6px;width:100%">${esc(title)}</textarea>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+      <span class="${counterCls}" id="lst-counter" style="font-size:12px;font-weight:600">${titleLen} / ${limit}</span>
+      <button class="btn" data-copy-target="lst-title" data-copy-label="Copier le titre">Copier le titre</button>
+    </div>
+    <hr class="sep">
+    <span class="eyebrow">Description</span>
+    <textarea id="lst-desc" rows="11" style="margin-top:6px;width:100%">${esc(desc)}</textarea>
+    <div class="actions" style="justify-content:flex-end;margin-top:6px">
+      <button class="btn" data-copy-target="lst-desc" data-copy-label="Copier la description">Copier la description</button>
+    </div>
+    ${ctx.kind==="stock" ? `<div class="actions"><button class="btn primary" data-save-listing="${ctx.id}" style="width:100%">Enregistrer les modifications</button></div>` : `<p class="note">Sans exemplaire précis, cette annonce n'est pas enregistrée — copie-la avant de fermer.</p>`}
+    ` : ""}
+  `,"center");
+  document.getElementById("lst-title")?.addEventListener("input", e=>{
+    const len = e.target.value.length;
+    const c = document.getElementById("lst-counter");
+    c.textContent = `${len} / ${limit}`;
+    c.className = (len/limit)>1 ? "loss" : ((len/limit)>=0.9 ? "loss" : "dim");
+  });
+}
+
+async function listingSettingsSheet(){
+  const s = await loadListingSettings(true);
+  const varList = (vars) => vars.map(v=>`<code>{${v}}</code>`).join(" ");
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Réglages</span><h2>Annonces</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <div class="f3">
+      <label><span class="lb">Plateforme par défaut</span><select id="ls-defplatform">
+        ${Object.entries(LISTING_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${s.default_platform===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+      <label><span class="lb">Style par défaut</span><select id="ls-defstyle">
+        ${Object.entries(LISTING_STYLE_LABELS).map(([k,l])=>`<option value="${k}" ${s.default_style===k?"selected":""}>${l}</option>`).join("")}
+      </select></label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:26px"><input type="checkbox" id="ls-emojis" ${s.emojis_enabled?"checked":""} style="width:auto;min-height:auto">
+        <span>Émojis activés</span></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Limite de caractères — Vinted</span><input id="ls-limit-vinted" type="number" min="10" value="${s.platforms.vinted.title_limit}"></label>
+      <label><span class="lb">Limite de caractères — eBay</span><input id="ls-limit-ebay" type="number" min="10" value="${s.platforms.ebay.title_limit}"></label>
+    </div>
+    <label><span class="lb">Délai d'expédition annoncé</span><input id="ls-delai" value="${esc(s.delai_expedition)}" placeholder="sous 2 jours ouvrés"></label>
+
+    <hr class="sep">
+    <span class="eyebrow">Gabarit du titre</span>
+    <p class="note" style="margin:4px 0">Variables disponibles : ${varList(s.title_vars)}</p>
+    <textarea id="ls-title-tpl" rows="2" style="width:100%">${esc(s.title_template)}</textarea>
+
+    <hr class="sep">
+    <span class="eyebrow">Gabarits de description</span>
+    <p class="note" style="margin:4px 0">Variables disponibles : ${varList(s.desc_vars)}. Une ligne contenant une variable sans valeur disparaît proprement (sauf {nom_alt}, qui s'efface seule sans emporter sa ligne). Aucun lien externe (http, www.) : la génération serait bloquée.</p>
+    ${Object.entries(LISTING_STYLE_LABELS).map(([k,l])=>`
+      <label><span class="lb">${l}</span></label>
+      <textarea id="ls-tpl-${k}" rows="8" style="width:100%;margin-bottom:10px">${esc(s.description_templates[k])}</textarea>
+    `).join("")}
+
+    <div class="actions"><button class="btn primary" data-save-listing-settings style="width:100%">Enregistrer</button></div>
   `,"center");
 }
 
@@ -1861,6 +2033,7 @@ async function cardEntrySheet(cardId){
     <div class="actions" style="justify-content:flex-start">
       <button class="btn" data-card-to-order="${c.id}">+ Ajouter à une commande</button>
       <button class="btn" data-card-to-stock="${c.id}">+ Ajouter au stock</button>
+      <button class="btn" data-card-listing="${c.id}">📝 Générer l'annonce</button>
     </div>
     <hr class="sep">
     <span class="eyebrow">Exemplaires liés (${(c.exemplaires||[]).length})</span>
@@ -2053,6 +2226,7 @@ function menuSheet(){
       <button class="menu-item" data-action="settings">Réglages de l'estimation</button>
       <button class="menu-item" data-action="card-settings">Réglages achat-revente</button>
       <button class="menu-item" data-action="card-registry">Référentiel de cartes</button>
+      <button class="menu-item" data-action="listing-settings">Réglages annonces</button>
       <button class="menu-item" data-action="export">Exporter (JSON)</button>
       <button class="menu-item" data-action="export-zip">Exporter tout (ZIP + photos)</button>
       <button class="menu-item" data-action="import">Importer</button>
@@ -2237,6 +2411,7 @@ document.addEventListener("click", async ev=>{
     if(act==="new-import-order") return importOrderSheet(null);
     if(act==="card-settings") return cardSettingsForm();
     if(act==="card-registry") return cardRegistryAdminSheet();
+    if(act==="listing-settings") return listingSettingsSheet();
 
     // --- Référentiel de cartes ---
     const oc = t.closest("[data-open-card]"); if(oc) return cardEntrySheet(oc.dataset.openCard);
@@ -2352,6 +2527,43 @@ document.addEventListener("click", async ev=>{
       if(!n || n<1) return;
       await api(`/api/stock/${dup.dataset.dupStock}/duplicate`,{method:"POST",json:{n}});
       await loadStock(); return renderRows();
+    }
+
+    // --- Générateur d'annonces ---
+    const opl = t.closest("[data-open-listing]"); if(opl) return openListingSheet(opl.dataset.openListing);
+    const clc = t.closest("[data-card-listing]"); if(clc) return cardListingChooser(clc.dataset.cardListing);
+    const cls = t.closest("[data-choose-listing-stock]"); if(cls) return openListingSheet(cls.dataset.chooseListingStock);
+    const clk = t.closest("[data-choose-listing-card]");
+    if(clk){
+      const c = await api("/api/cards/"+clk.dataset.chooseListingCard);
+      return openCardListingSheet(clk.dataset.chooseListingCard, c.name);
+    }
+    const lg = t.closest("[data-listing-generate]");
+    if(lg){
+      const ctx = {kind:lg.dataset.listingKind, id:lg.dataset.listingId, title:lg.dataset.listingTitle};
+      const platform = document.getElementById("lst-platform").value;
+      const style = document.getElementById("lst-style").value;
+      return listingGenerate(ctx, platform, style, false);
+    }
+    const cpt = t.closest("[data-copy-target]");
+    if(cpt){
+      const ta = document.getElementById(cpt.dataset.copyTarget);
+      const original = cpt.dataset.copyLabel;
+      try{ await navigator.clipboard.writeText(ta.value); }
+      catch(e){ ta.select(); document.execCommand("copy"); }
+      cpt.textContent = "Copié !";
+      setTimeout(()=>{ cpt.textContent = original; }, 1200);
+      return;
+    }
+    const svl = t.closest("[data-save-listing]");
+    if(svl){
+      await api(`/api/stock/${svl.dataset.saveListing}/listing`,{method:"PUT",json:{
+        title:document.getElementById("lst-title").value, description:document.getElementById("lst-desc").value,
+      }});
+      await loadStock();
+      svl.textContent = "Enregistré !";
+      setTimeout(()=>{ svl.textContent = "Enregistrer les modifications"; }, 1200);
+      return;
     }
 
     // --- Studio photo ---
@@ -2589,6 +2801,22 @@ document.addEventListener("click", async ev=>{
       await loadCardDeals(); closeSheet(); return renderRows();
     }
 
+    const sls = t.closest("[data-save-listing-settings]");
+    if(sls){
+      const g = id => document.getElementById(id).value;
+      const description_templates = {};
+      Object.keys(LISTING_STYLE_LABELS).forEach(k=>{ description_templates[k] = g(`ls-tpl-${k}`); });
+      await api("/api/listing-settings",{method:"PUT", json:{
+        title_template:g("ls-title-tpl"), description_templates,
+        platforms:{vinted:{title_limit:g("ls-limit-vinted")}, ebay:{title_limit:g("ls-limit-ebay")}},
+        default_platform:g("ls-defplatform"), default_style:g("ls-defstyle"),
+        emojis_enabled:document.getElementById("ls-emojis").checked, delai_expedition:g("ls-delai"),
+      }});
+      await loadListingSettings(true);
+      closeSheet();
+      return;
+    }
+
     // --- Stock d'achat-revente ---
     if(act==="new-stock") return stockSheet(null);
     if(act==="pick-a-card"){
@@ -2612,6 +2840,8 @@ document.addEventListener("click", async ev=>{
         type:g("st-type"), grade:g("st-grade"), cost_basis:g("st-cost")||0, buy_date:g("st-buydate"),
         buy_platform:g("st-buyplatform"), buy_url:g("st-buyurl"), target_price:g("st-target")||null,
         target_platform:g("st-targetplatform")||null, notes:g("st-notes"), card_id:current?.card_id||null,
+        nom_alternatif:g("st-nomalt"), cert_number:g("st-cert"), cert_organisme:g("st-certorg")||"PSA",
+        cert_year:g("st-certyear"),
       };
       if(!body.name) return document.getElementById("st-name").focus();
       if(id){

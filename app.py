@@ -40,6 +40,7 @@ import card_deals as card_deals_mod
 import stock as stock_mod
 import cards as cards_mod
 import photostudio as photostudio_mod
+import listings as listings_mod
 
 BASE = Path(__file__).parent
 DB = Path(os.environ.get("DB_PATH") or (BASE / "portfolio.db"))
@@ -442,6 +443,26 @@ def migrate(con: sqlite3.Connection) -> None:
             # resale_platform) — calculé côté serveur à chaque écriture, jamais
             # saisi tel quel par le client. Porte le repère visuel "modifié".
             "target_overridden": "INTEGER NOT NULL DEFAULT 0",
+            # Nom original (japonais, etc.) — un acheteur cherche "Pikachu",
+            # jamais "ピカチュウ" : les deux doivent pouvoir figurer dans
+            # l'annonce. Surcharge locale, comme les autres champs d'identité
+            # (la valeur propre à l'exemplaire prime, le référentiel comble).
+            "nom_alternatif": "TEXT DEFAULT ''",
+            # Certification : propre à CET exemplaire précis, jamais au
+            # référentiel — deux PSA 10 de la même carte ont deux numéros
+            # différents. Organisme par défaut PSA (seul géré par le studio
+            # photo aujourd'hui), mais saisissable librement.
+            "cert_number": "TEXT DEFAULT ''",
+            "cert_organisme": "TEXT DEFAULT 'PSA'",
+            "cert_year": "TEXT DEFAULT ''",
+            # Annonce générée : persistée pour ne pas la reperdre en
+            # rouvrant la fiche, et pour distinguer une régénération d'une
+            # modification manuelle (celle-ci ne doit jamais être écrasée
+            # sans confirmation).
+            "listing_title": "TEXT", "listing_description": "TEXT",
+            "listing_platform": "TEXT", "listing_style": "TEXT",
+            "listing_edited": "INTEGER NOT NULL DEFAULT 0",
+            "listing_generated_at": "TEXT",
         },
         "cards": {
             # Prix de vente visé par défaut de la carte (distinct de resale_
@@ -450,6 +471,9 @@ def migrate(con: sqlite3.Connection) -> None:
             # la fiche. Idem pour la plateforme de revente par défaut.
             "resale_target_eur": "REAL",
             "default_resale_platform": "TEXT",
+            # Nom original — voir stock_items.nom_alternatif ci-dessus, même
+            # rôle mais au niveau du référentiel (valeur de repli).
+            "nom_alternatif": "TEXT DEFAULT ''",
         },
     }
     for table, cols in add.items():
@@ -539,6 +563,36 @@ def put_card_settings(p: dict) -> dict:
     with db() as con:
         con.execute(
             "INSERT INTO settings(k,v) VALUES('card_deal_settings',?) "
+            "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (json.dumps(current),),
+        )
+    return current
+
+
+def get_listing_settings() -> dict:
+    with db() as con:
+        row = con.execute("SELECT v FROM settings WHERE k='listing_settings'").fetchone()
+    return listings_mod.merge_listing_settings(json.loads(row["v"]) if row else None)
+
+
+def put_listing_settings(p: dict) -> dict:
+    current = get_listing_settings()
+    for k, v in p.items():
+        if k == "description_templates" and isinstance(v, dict):
+            for style, tpl in v.items():
+                if style in current["description_templates"]:
+                    current["description_templates"][style] = str(tpl)
+        elif k == "platforms" and isinstance(v, dict):
+            for plat, cfg in v.items():
+                if plat in current["platforms"] and isinstance(cfg, dict) and "title_limit" in cfg:
+                    current["platforms"][plat]["title_limit"] = max(10, int(_num(cfg["title_limit"], current["platforms"][plat]["title_limit"])))
+        elif k == "emojis_enabled":
+            current[k] = bool(v)
+        elif k in ("title_template", "delai_expedition", "default_platform", "default_style"):
+            current[k] = str(v)
+    with db() as con:
+        con.execute(
+            "INSERT INTO settings(k,v) VALUES('listing_settings',?) "
             "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (json.dumps(current),),
         )
@@ -1562,6 +1616,16 @@ def api_put_card_settings(p: dict = Body(...)):
     return put_card_settings(p)
 
 
+@app.get("/api/listing-settings")
+def api_get_listing_settings():
+    return {**get_listing_settings(), "title_vars": listings_mod.TITLE_VARS, "desc_vars": listings_mod.DESC_VARS}
+
+
+@app.put("/api/listing-settings")
+def api_put_listing_settings(p: dict = Body(...)):
+    return put_listing_settings(p)
+
+
 @app.get("/api/fx/jpy")
 def api_fx_jpy():
     rate = fetch_jpy_eur_rate()
@@ -2041,7 +2105,8 @@ def api_realize_order_line(lid: str, p: dict = Body(...)):
 STOCK_FIELDS = ["linked_item_id", "name", "set_name", "card_number", "lang", "type", "grade",
                 "cost_basis", "buy_date", "buy_platform", "buy_url",
                 "target_price", "target_platform", "notes", "source_order_line_id",
-                "card_id", "target_overridden"]
+                "card_id", "target_overridden",
+                "nom_alternatif", "cert_number", "cert_organisme", "cert_year"]
 
 
 def clean_stock_item(p: dict) -> dict:
@@ -2068,6 +2133,10 @@ def clean_stock_item(p: dict) -> dict:
         # Recalculé côté serveur juste avant l'écriture (cf. _resale_overridden) ;
         # 0 par défaut ici, jamais pris tel quel depuis le client.
         "target_overridden": 0,
+        "nom_alternatif": str(p.get("nom_alternatif", ""))[:200],
+        "cert_number": str(p.get("cert_number", ""))[:60],
+        "cert_organisme": str(p.get("cert_organisme") or "PSA")[:40],
+        "cert_year": str(p.get("cert_year", ""))[:10],
     }
 
 
@@ -2187,6 +2256,103 @@ def api_reset_stock_target(sid: str):
             (card["resale_target_eur"] if card else None, card["default_resale_platform"] if card else None, sid),
         )
     return {"ok": True}
+
+
+STOCK_TYPE_LABELS = {"scelle": "Scellé", "loose": "Loose", "gradee": "Gradée"}
+
+
+def _listing_ctx_from_stock(stock_row: dict, card: dict | None) -> dict:
+    """Résout les variables du générateur d'annonce : la valeur propre à
+    l'exemplaire prime, le référentiel comble si elle est vide — même
+    convention que les autres champs d'identité de cette fiche (photo, prix
+    de vente visé). La certification, elle, n'a pas de repli possible :
+    propre à cet exemplaire précis, jamais au référentiel."""
+    def pick(field):
+        own = stock_row.get(field)
+        if isinstance(own, str):
+            own = own.strip()
+        if own:
+            return own
+        return (card.get(field) if card else None) or ""
+    return {
+        "nom_fr": pick("name"), "nom_alt": pick("nom_alternatif"),
+        "set": pick("set_name"), "numero": pick("card_number"),
+        "langue": pick("lang"), "grade": listings_mod.extract_grade_number(pick("grade")),
+        "type_carte": STOCK_TYPE_LABELS.get(stock_row.get("type"), ""),
+        "cert": stock_row.get("cert_number") or "",
+        "organisme": stock_row.get("cert_organisme") or "PSA",
+        "annee_gradation": stock_row.get("cert_year") or "",
+    }
+
+
+@app.post("/api/stock/{sid}/listing/generate")
+def api_generate_stock_listing(sid: str, p: dict = Body(...)):
+    """Génère titre + description depuis les données déjà connues (référentiel
+    + exemplaire) — jamais depuis un modèle de langage. Une version modifiée
+    à la main (listing_edited=1) n'est jamais écrasée sans confirmation
+    explicite (force=true)."""
+    with db() as con:
+        row = con.execute("SELECT * FROM stock_items WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ligne introuvable")
+        row = dict(row)
+        card = None
+        if row.get("card_id"):
+            crow = con.execute("SELECT * FROM cards WHERE id=?", (row["card_id"],)).fetchone()
+            card = dict(crow) if crow else None
+    if row.get("listing_edited") and not p.get("force"):
+        return {"needs_confirm": True}
+    settings = get_listing_settings()
+    ctx = _listing_ctx_from_stock(row, card)
+    result = listings_mod.build_listing(ctx, settings, p.get("platform"), p.get("style"))
+    if result["blocked"]:
+        return result
+    with db() as con:
+        con.execute(
+            "UPDATE stock_items SET listing_title=?, listing_description=?, listing_platform=?, "
+            "listing_style=?, listing_edited=0, listing_generated_at=? WHERE id=?",
+            (result["title"], result["description"], result["platform"], result["style"],
+             datetime.now().isoformat(timespec="seconds"), sid),
+        )
+    return result
+
+
+@app.put("/api/stock/{sid}/listing")
+def api_save_stock_listing(sid: str, p: dict = Body(...)):
+    """Sauvegarde manuelle du texte (après modification) — marque la version
+    comme éditée : une future régénération demandera confirmation."""
+    with db() as con:
+        cur = con.execute(
+            "UPDATE stock_items SET listing_title=?, listing_description=?, listing_edited=1 WHERE id=?",
+            (str(p.get("title", ""))[:300], str(p.get("description", ""))[:5000], sid),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "ligne introuvable")
+    return {"ok": True}
+
+
+@app.post("/api/cards/{cid}/listing/generate")
+def api_generate_card_listing(cid: str, p: dict = Body(...)):
+    """Depuis le référentiel : avec un exemplaire précisé (stock_id), identique
+    au flux stock, persisté dessus. Sans exemplaire, génération à la volée
+    (aperçu, rien à sauvegarder) — jamais de numéro de certification possible
+    dans ce cas, propre à un exemplaire physique précis."""
+    if p.get("stock_id"):
+        return api_generate_stock_listing(p["stock_id"], p)
+    with db() as con:
+        card = con.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        if not card:
+            raise HTTPException(404, "carte introuvable")
+        card = dict(card)
+    settings = get_listing_settings()
+    ctx = {
+        "nom_fr": card.get("name") or "", "nom_alt": card.get("nom_alternatif") or "",
+        "set": card.get("set_name") or "", "numero": card.get("card_number") or "",
+        "langue": card.get("lang") or "", "grade": listings_mod.extract_grade_number(card.get("grade") or ""),
+        "type_carte": STOCK_TYPE_LABELS.get(card.get("type"), ""),
+        "cert": "", "organisme": "PSA", "annee_gradation": "",
+    }
+    return listings_mod.build_listing(ctx, settings, p.get("platform"), p.get("style"))
 
 
 @app.post("/api/stock/{sid}/duplicate")
@@ -2363,6 +2529,7 @@ def api_transfer_item_to_stock(iid: str):
         "buy_platform": "", "buy_url": "", "target_price": None, "target_platform": None,
         "notes": "", "source_order_line_id": None,
         "card_id": it.get("card_id"), "target_overridden": 0,
+        "nom_alternatif": "", "cert_number": "", "cert_organisme": "PSA", "cert_year": "",
     }
     sid = nid()
     now = datetime.now().isoformat(timespec="seconds")
@@ -2428,6 +2595,8 @@ def api_line_to_stock(lid: str):
                 "target_price": line.get("resale_target_eur"), "target_platform": line.get("resale_platform"),
                 "notes": "", "source_order_line_id": lid,
                 "card_id": line.get("card_id"), "target_overridden": 0,
+                "nom_alternatif": (card.get("nom_alternatif") if card else "") or "",
+                "cert_number": "", "cert_organisme": "PSA", "cert_year": "",
             }
             con.execute(
                 f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
@@ -2594,7 +2763,7 @@ def _copy_sheet_photo_to_card(sheet_id: str, sheet_photo_id: str, card_id: str) 
 
 CARD_FIELDS = ["name", "set_name", "card_number", "lang", "type", "grade", "profit_target_pct",
                "resale_mode", "resale_min", "resale_median", "resale_max", "buy_max_computed",
-               "resale_target_eur", "default_resale_platform", "notes"]
+               "resale_target_eur", "default_resale_platform", "nom_alternatif", "notes"]
 CARD_REF_TABLES = ["items", "card_sheets", "import_order_lines", "stock_items", "card_listings"]
 
 
@@ -2616,6 +2785,7 @@ def clean_card(p: dict) -> dict:
         "resale_target_eur": numopt("resale_target_eur"),
         "default_resale_platform": (p.get("default_resale_platform")
                                      if p.get("default_resale_platform") in card_deals_mod.SELL_PLATFORMS else None),
+        "nom_alternatif": str(p.get("nom_alternatif", ""))[:200],
         "notes": str(p.get("notes", ""))[:2000],
     }
 
@@ -4030,13 +4200,18 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
             con.execute(
                 f"INSERT OR REPLACE INTO stock_items(id,{','.join(STOCK_FIELDS)},"
                 "photo_id,photo_size_bytes,photo_width,photo_height,status,"
-                "sale_price,sale_platform,sale_net,sale_net_manual,created_at) "
-                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?)",
+                "sale_price,sale_platform,sale_net,sale_net_manual,"
+                "listing_title,listing_description,listing_platform,listing_style,"
+                "listing_edited,listing_generated_at,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (stid, *[sd[f] for f in STOCK_FIELDS],
                  photo_id, photo_size, photo_w, photo_h,
                  si.get("status") if si.get("status") in stock_mod.STATUSES else "achete",
                  si.get("sale_price"), si.get("sale_platform"),
                  si.get("sale_net"), int(bool(si.get("sale_net_manual"))),
+                 si.get("listing_title"), si.get("listing_description"),
+                 si.get("listing_platform"), si.get("listing_style"),
+                 int(bool(si.get("listing_edited"))), si.get("listing_generated_at"),
                  str(si.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for ev in si.get("events") or []:
