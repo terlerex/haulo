@@ -435,6 +435,17 @@ def migrate(con: sqlite3.Connection) -> None:
             # l'identité du référentiel (nom+set+numéro+langue+grade) puisse
             # s'appuyer dessus. Vide par défaut sur les fiches existantes.
             "card_number": "TEXT DEFAULT ''",
+            # Objectif de bénéfice en % (historique) ou en € fixe (utile pour
+            # un scellé cher où un % représenterait une somme disproportionnée,
+            # ou une carte bon marché où un % donnerait un bénéfice ridicule).
+            # Mémorisé par fiche, jamais un réglage global.
+            "profit_target_mode": "TEXT NOT NULL DEFAULT 'pct'",
+            "profit_target_eur": "REAL",
+            # Coût de revient réel (déjà acheté) ou estimé (pas encore acheté),
+            # saisi à la main — seulement utilisé en mode € : c'est le point de
+            # départ du calcul inversé (prix de vente minimum), à la place de
+            # la fourchette de revente utilisée en mode %.
+            "cost_basis_estimate": "REAL",
         },
         "stock_items": {
             "card_id": "TEXT REFERENCES cards(id)",
@@ -1490,7 +1501,8 @@ def api_get_deal_thumb(did: str, pid: str):
 # `deals`/`deal_media` (chantier 5), laissés intacts et non affichés côté UI.
 
 CARD_SHEET_FIELDS = ["item_id", "name", "type", "grade", "lang", "set_name",
-                      "profit_target_pct", "resale_platform", "resale_mode",
+                      "profit_target_pct", "profit_target_mode", "profit_target_eur", "cost_basis_estimate",
+                      "resale_platform", "resale_mode",
                       "resale_min", "resale_median", "resale_max",
                       "resale_shipping_cost", "packaging_cost", "status", "notes"]
 
@@ -1502,11 +1514,14 @@ def clean_card_sheet(p: dict) -> dict:
     return {
         "item_id": (str(p["item_id"]) if p.get("item_id") else None),
         "name": str(p.get("name", ""))[:200],
-        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "type": p.get("type") if p.get("type") in ("loose", "gradee", "scelle") else "loose",
         "grade": str(p.get("grade", ""))[:40],
         "lang": str(p.get("lang", ""))[:10],
         "set_name": str(p.get("set_name", ""))[:120],
         "profit_target_pct": (max(0.0, numopt("profit_target_pct")) if numopt("profit_target_pct") is not None else None),
+        "profit_target_mode": "eur" if p.get("profit_target_mode") == "eur" else "pct",
+        "profit_target_eur": (max(0.0, numopt("profit_target_eur")) if numopt("profit_target_eur") is not None else None),
+        "cost_basis_estimate": (max(0.0, numopt("cost_basis_estimate")) if numopt("cost_basis_estimate") is not None else None),
         "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else "ebay",
         "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
         "resale_min": numopt("resale_min"),
@@ -1704,7 +1719,7 @@ def api_realize_card_sheet(sid: str, p: dict = Body(...)):
             con.execute(
                 "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (iid, d["name"] or "Item sans nom", d["type"] if d["type"] in ("loose", "gradee") else "loose",
+                (iid, d["name"] or "Item sans nom", d["type"] if d["type"] in ("loose", "gradee", "scelle") else "loose",
                  d["lang"] or "FR", d["grade"], d["set_name"] or "", qty, buy_price, buy_date,
                  d["notes"], "owned", 0.0, now),
             )
@@ -2119,7 +2134,7 @@ def clean_stock_item(p: dict) -> dict:
         "set_name": str(p.get("set_name", ""))[:120],
         "card_number": str(p.get("card_number", ""))[:40],
         "lang": str(p.get("lang", "FR"))[:10],
-        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "type": p.get("type") if p.get("type") in ("loose", "gradee", "scelle") else "loose",
         "grade": str(p.get("grade", ""))[:40],
         "cost_basis": max(0.0, float(p.get("cost_basis") or 0)),
         "buy_date": str(p.get("buy_date") or date.today().isoformat())[:10],
@@ -2523,7 +2538,7 @@ def api_transfer_item_to_stock(iid: str):
             con.execute("UPDATE items SET status='watch' WHERE id=?", (iid,))
     d = {
         "linked_item_id": iid, "name": it["name"], "set_name": it["set_name"], "card_number": "",
-        "lang": it["lang"], "type": it["type"] if it["type"] in ("loose", "gradee") else "loose",
+        "lang": it["lang"], "type": it["type"] if it["type"] in ("loose", "gradee", "scelle") else "loose",
         "grade": it["grade"], "cost_basis": it["buy_price"],
         "buy_date": it["buy_date"] or date.today().isoformat(),
         "buy_platform": "", "buy_url": "", "target_price": None, "target_platform": None,
@@ -2581,7 +2596,7 @@ def api_line_to_stock(lid: str):
     card_number = card["card_number"] if card else ""
     lang = (card["lang"] if card else "") or "FR"
     grade = card["grade"] if card else ""
-    ctype = card["type"] if card else (line["type"] if line["type"] in ("loose", "gradee") else "loose")
+    ctype = card["type"] if card else (line["type"] if line["type"] in ("loose", "gradee", "scelle") else "loose")
     buy_date = str(order.get("order_date") or date.today().isoformat())[:10]
     now = datetime.now().isoformat(timespec="seconds")
     new_ids = []
@@ -2776,7 +2791,7 @@ def clean_card(p: dict) -> dict:
         "set_name": str(p.get("set_name", ""))[:120],
         "card_number": str(p.get("card_number", ""))[:40],
         "lang": str(p.get("lang", "FR"))[:10],
-        "type": p.get("type") if p.get("type") in ("loose", "gradee") else "loose",
+        "type": p.get("type") if p.get("type") in ("loose", "gradee", "scelle") else "loose",
         "grade": str(p.get("grade", ""))[:40],
         "profit_target_pct": numopt("profit_target_pct"),
         "resale_mode": "manual" if p.get("resale_mode") == "manual" else "auto",
@@ -2805,26 +2820,26 @@ def _resale_overridden(con: sqlite3.Connection, card_id: str | None, target, pla
 def _identity_fields_items(row: dict) -> dict:
     return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": "",
             "lang": row.get("lang") or "", "grade": row.get("grade") or "",
-            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+            "type": row.get("type") if row.get("type") in ("loose", "gradee", "scelle") else "loose"}
 
 
 def _identity_fields_card_sheet(row: dict) -> dict:
     return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": row.get("card_number") or "",
             "lang": row.get("lang") or "", "grade": row.get("grade") or "",
-            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+            "type": row.get("type") if row.get("type") in ("loose", "gradee", "scelle") else "loose"}
 
 
 def _identity_fields_order_line(row: dict) -> dict:
     # Saisie volontairement pauvre à l'origine (nom/qté/prix seulement) : peu
     # de matière pour un rapprochement fiable, le score reflète honnêtement ça.
     return {"name": row["name"], "set_name": "", "card_number": "", "lang": "", "grade": "",
-            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+            "type": row.get("type") if row.get("type") in ("loose", "gradee", "scelle") else "loose"}
 
 
 def _identity_fields_stock(row: dict) -> dict:
     return {"name": row["name"], "set_name": row.get("set_name") or "", "card_number": row.get("card_number") or "",
             "lang": row.get("lang") or "", "grade": row.get("grade") or "",
-            "type": row.get("type") if row.get("type") in ("loose", "gradee") else "loose"}
+            "type": row.get("type") if row.get("type") in ("loose", "gradee", "scelle") else "loose"}
 
 
 def _card_photo_urls(row: dict) -> dict:

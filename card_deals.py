@@ -138,6 +138,28 @@ def net_from_resale(price: float, sell_fee: dict, my_shipping_cost: float) -> di
             "my_shipping_cost": round(my_shipping_cost, 2), "net": round(net, 2)}
 
 
+def sell_min_price(net_required: float, sell_fee: dict, my_shipping_cost: float) -> float:
+    """Inverse de net_from_resale : prix de vente minimum P tel que
+    P x (1-f) - F - E = net_required (mode objectif en €, cf. cost_max pour
+    le mode %). Même cascade de frais, remontée dans l'autre sens.
+
+    Gère le plafond de commission (cardmarket) : au-delà du prix où la
+    commission atteint le plafond, elle n'augmente plus avec le prix — la
+    résolution "sans plafond" n'est alors plus valide, il faut recalculer
+    avec une commission fixe = cap."""
+    pct = float(sell_fee.get("pct", 0)) / 100
+    fixed = float(sell_fee.get("fixed", 0))
+    cap = sell_fee.get("cap")
+    target = net_required + my_shipping_cost
+    if pct >= 1:
+        return None
+    price = (target + fixed) / (1 - pct)
+    if cap is not None and (price * pct + fixed) > float(cap):
+        price = target + float(cap)
+    return price
+
+
+
 def cost_max(net: float, profit_target_pct: float) -> float:
     """C_max = N / (1+m) : coût de revient total maximum acceptable pour
     respecter l'objectif de bénéfice m (%, sur le COÛT, pas sur le prix de
@@ -221,28 +243,59 @@ def buy_cost_from_listing(platform: str, price: float, shipping: float, buy_fees
 
 def build_card_sheet_view(sheet: dict, listings: list[dict], settings: dict,
                            resale_stats: dict, fx_rate: float | None = None) -> dict:
-    """Vue complète d'une fiche carte : C_max prudent/optimiste, prix d'achat
-    max par plateforme (les 4), et confrontation de chaque annonce suivie."""
+    """Vue complète d'une fiche carte.
+
+    Deux modes d'objectif de bénéfice, mémorisé par fiche (`profit_target_mode`) :
+      - "pct" (défaut, comportement historique) : à partir d'un prix de revente
+        visé (P25/P75), calcule le coût de revient max puis le prix d'achat
+        max par plateforme d'ACHAT (les 4) — utile pour scouter un achat.
+      - "eur" : à partir d'un coût de revient connu ou estimé (`cost_basis_
+        estimate`) et d'un bénéfice fixe visé en € (`profit_target_eur`),
+        remonte la même chaîne de frais dans l'autre sens pour donner le prix
+        de vente MINIMUM par plateforme de REVENTE — utile quand l'exemplaire
+        est déjà (ou bientôt) en main et qu'un pourcentage n'a pas de sens
+        (scellé cher, carte bon marché)."""
     sell_fee = settings["sell_fees"].get(sheet["resale_platform"], {})
-    pt = sheet.get("profit_target_pct")  # "is not None", pas "or" : 0% (seuil de rentabilité) est légitime
-    m = float(pt if pt is not None else settings["profit_target_pct"])
+    mode = sheet.get("profit_target_mode") or "pct"
     e = float(sheet.get("resale_shipping_cost") or 0) + float(sheet.get("packaging_cost") or 0)
 
-    p25 = resale_stats.get("p25")
-    p75 = resale_stats.get("p75")
     scenarios = {}
-    for label, price in (("prudent", p25), ("optimiste", p75)):
-        if price is None:
-            scenarios[label] = None
-            continue
-        net = net_from_resale(price, sell_fee, e)
-        cmax = cost_max(net["net"], m)
-        rows = []
-        for plat in ("ebay", "vinted", "cardmarket", "japan"):
-            rows.append(buy_max(plat, cmax, settings["buy_fees"], settings["import"],
-                                 settings["japan_lot_size"], fx_rate=fx_rate,
-                                 fx_spread_pct=settings["fx_spread_pct"]))
-        scenarios[label] = {"resale_price": price, "net": net, "c_max": round(cmax, 2), "rows": rows}
+    sell_min = None
+    m = None
+    obj_eur = None
+
+    if mode == "eur":
+        obj_eur = float(sheet.get("profit_target_eur") or 0)
+        c_min = sheet.get("cost_basis_estimate")
+        if c_min is None or c_min == "":
+            sell_min = {"error": "cout_manquant"}
+        else:
+            c_min = float(c_min)
+            net_required = c_min + obj_eur
+            rows = []
+            for plat in ("ebay", "vinted", "cardmarket"):
+                fee = settings["sell_fees"].get(plat, {})
+                price_min = sell_min_price(net_required, fee, e)
+                rows.append({"platform": plat, "price_min": round(price_min, 2) if price_min is not None else None})
+            sell_min = {"cost_basis": round(c_min, 2), "profit_target_eur": round(obj_eur, 2),
+                        "my_shipping_cost": round(e, 2), "net_required": round(net_required, 2), "rows": rows}
+    else:
+        pt = sheet.get("profit_target_pct")  # "is not None", pas "or" : 0% (seuil de rentabilité) est légitime
+        m = float(pt if pt is not None else settings["profit_target_pct"])
+        p25 = resale_stats.get("p25")
+        p75 = resale_stats.get("p75")
+        for label, price in (("prudent", p25), ("optimiste", p75)):
+            if price is None:
+                scenarios[label] = None
+                continue
+            net = net_from_resale(price, sell_fee, e)
+            cmax = cost_max(net["net"], m)
+            rows = []
+            for plat in ("ebay", "vinted", "cardmarket", "japan"):
+                rows.append(buy_max(plat, cmax, settings["buy_fees"], settings["import"],
+                                     settings["japan_lot_size"], fx_rate=fx_rate,
+                                     fx_spread_pct=settings["fx_spread_pct"]))
+            scenarios[label] = {"resale_price": price, "net": net, "c_max": round(cmax, 2), "rows": rows}
 
     listing_checks = []
     prudent = scenarios.get("prudent")
@@ -269,8 +322,9 @@ def build_card_sheet_view(sheet: dict, listings: list[dict], settings: dict,
             "gap": gap, "real_margin_pct": real_margin_pct,
         })
 
-    return {"resale_stats": resale_stats, "scenarios": scenarios,
-            "listings": listing_checks, "sell_fee": sell_fee, "profit_target_pct": m}
+    return {"resale_stats": resale_stats, "scenarios": scenarios, "mode": mode, "sell_min": sell_min,
+            "listings": listing_checks, "sell_fee": sell_fee, "profit_target_pct": m,
+            "profit_target_eur": obj_eur}
 
 
 # ------------------------------------------------------- import Japon (commande)
