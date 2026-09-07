@@ -66,9 +66,16 @@ def _ratio(a: str, b: str) -> float:
 def similarity(a: dict, b: dict) -> float:
     """Score pondéré : nom 0.5, set 0.2, numéro 0.15, langue 0.15.
     Le grade est un VERROU, pas un critère pondéré : deux grades non vides et
-    différents -> score forcé à 0, jamais de rapprochement, même noms identiques."""
+    différents -> score forcé à 0, jamais de rapprochement, même noms identiques.
+    Le type scellé/carte est un second VERROU du même genre : un produit
+    scellé (display, ETB...) n'est jamais la même entrée de référentiel qu'une
+    carte (loose/gradée), même en cas de nom proche — les grades vides des
+    deux côtés (un scellé n'a pas de grade) ne suffiraient pas à l'empêcher
+    sans cette règle dédiée."""
     ga, gb = normalize_grade(a.get("grade")), normalize_grade(b.get("grade"))
     if ga and gb and ga != gb:
+        return 0.0
+    if (a.get("type") == "scelle") != (b.get("type") == "scelle"):
         return 0.0
 
     name_s = _ratio(normalize_text(a.get("name")), normalize_text(b.get("name")))
