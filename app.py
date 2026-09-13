@@ -2839,6 +2839,7 @@ def _card_picker_entry(c: dict, counts: dict | None = None) -> dict:
         "resale_min": c.get("resale_min"), "resale_median": c.get("resale_median"), "resale_max": c.get("resale_max"),
         "buy_max_computed": c.get("buy_max_computed"),
         "resale_target_eur": c.get("resale_target_eur"), "default_resale_platform": c.get("default_resale_platform"),
+        "nom_alternatif": c.get("nom_alternatif") or "",
         **_card_photo_urls(c),
         "counts": counts or {"bought": 0, "in_stock": 0, "sold": 0},
     }

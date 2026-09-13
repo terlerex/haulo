@@ -152,6 +152,7 @@ label{display:block;margin-bottom:12px}
 label .lb{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
 input,select,textarea{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:11px;min-height:44px}
+select{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
 textarea{min-height:auto}
 input:hover,select:hover{border-color:#3a3e44}
 .f2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
@@ -1750,6 +1751,8 @@ async function cardEntrySheet(cardId){
         ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${c.default_resale_platform===k?"selected":""}>${l}</option>`).join("")}
       </select></label>
     </div>
+    <label><span class="lb">Nom original</span><input id="ce-nomalt" value="${esc(c.nom_alternatif||"")}" placeholder="ピカチュウ"></label>
+    <p class="note" style="margin-top:4px">Repris automatiquement sur chaque nouvel exemplaire créé depuis le sélecteur — à ne saisir qu'une fois ici.</p>
     <div class="actions" style="justify-content:flex-start"><button class="btn" data-save-card-defaults="${c.id}">Enregistrer</button></div>
     <hr class="sep">
     <div class="actions" style="justify-content:flex-start">
@@ -1859,6 +1862,7 @@ async function pickCard(card){
       name:card.name, set_name:card.set_name, card_number:card.card_number, lang:card.lang||"FR",
       type:card.type, grade:card.grade, card_id:card.id, cost_basis:0,
       target_price:card.resale_target_eur, target_platform:card.default_resale_platform,
+      nom_alternatif:card.nom_alternatif||"",
     }});
     await loadStock();
   }
@@ -2177,7 +2181,8 @@ document.addEventListener("click", async ev=>{
       const cid = scd.dataset.saveCardDefaults;
       const c = await api("/api/cards/"+cid);
       const body = {...c, resale_target_eur: document.getElementById("ce-target").value||null,
-                    default_resale_platform: document.getElementById("ce-platform").value||null};
+                    default_resale_platform: document.getElementById("ce-platform").value||null,
+                    nom_alternatif: document.getElementById("ce-nomalt").value};
       await api("/api/cards/"+cid, {method:"PUT", json:body});
       return cardEntrySheet(cid);
     }
@@ -2190,6 +2195,7 @@ document.addEventListener("click", async ev=>{
         name:c.name, set_name:c.set_name, card_number:c.card_number, lang:c.lang||"FR",
         type:c.type, grade:c.grade, card_id:c.id, cost_basis:0,
         target_price:c.resale_target_eur, target_platform:c.default_resale_platform,
+        nom_alternatif:c.nom_alternatif||"",
       }});
       await loadStock();
       return stockSheet(r.id);
