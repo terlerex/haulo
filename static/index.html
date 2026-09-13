@@ -229,7 +229,6 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       <span aria-hidden="true">+</span><span class="fab-label">Ajouter un relevé</span>
     </button>
     <button data-mode="owned" aria-pressed="true"><span class="ico">◆</span><span>Portefeuille</span></button>
-    <button data-mode="watch" aria-pressed="false"><span class="ico">◇</span><span>Veille <span id="watch-count"></span></span></button>
     <button data-mode="deals" aria-pressed="false"><span class="ico">⇄</span><span>Achat-revente</span></button>
     <button data-mode="stock" aria-pressed="false"><span class="ico">📦</span><span>Stock</span></button>
     <button data-mode="studio" aria-pressed="false"><span class="ico">🎨</span><span>Studio</span></button>
@@ -487,47 +486,20 @@ function renderRows(){
   if(mode==="stock") return renderStock();
   if(mode==="studio") return;
   const host = document.getElementById("rows");
-  const pool = S.items.filter(i => (i.status||"owned")===mode);
-  document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
+  const pool = S.items.filter(i => (i.status||"owned")==="owned");
 
   const list = pool.filter(i =>
     (filter==="all" || i.type===filter) &&
     (!query || (i.name+" "+(i.set_name||"")+" "+(i.grade||"")).toLowerCase().includes(query))
-  ).sort((a,b)=> mode==="owned" ? b.value-a.value
-      : ((b.stats.sales_month??-1)-(a.stats.sales_month??-1)));
+  ).sort((a,b)=> b.value-a.value);
 
   if(!pool.length){
-    host.innerHTML = mode==="owned"
-      ? `<div class="empty"><b>Aucun item en portefeuille</b>
+    host.innerHTML = `<div class="empty"><b>Aucun item en portefeuille</b>
           Ajoute un display, une carte ou une gradée, puis colle tes relevés de prix.
-          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Ajouter un item</button></div></div>`
-      : `<div class="empty"><b>Rien sous surveillance</b>
-          Mets ici ce que tu n'as pas encore acheté. Ajoute des relevés au fil des semaines : tu verras la tendance et le rythme des ventes avant de te décider.
-          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Suivre un item</button></div></div>`;
+          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Ajouter un item</button></div></div>`;
     return;
   }
   if(!list.length){ host.innerHTML = `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`; return; }
-
-  if(mode==="watch"){
-    host.innerHTML = list.map(i=>{
-      const st = i.stats;
-      return `<button class="card-item" data-open="${i.id}">
-        <div class="card-thumb">${thumbOf(i)}</div>
-        <div class="card-body">
-          <div class="card-title-row">
-            <span class="card-title">${esc(i.name)}</span>
-            <span class="card-value">${eur(i.est.value)}</span>
-          </div>
-          <div class="card-sub-row">
-            <span><span class="tag t-${i.type}">${TYPES[i.type]}</span>
-              ${[i.set_name,i.grade].filter(Boolean).map(esc).join(" · ")}</span>
-            <span class="r">${trendBadge(st.trend30)} ${sales(st.sales_month)}</span>
-          </div>
-        </div>
-      </button>`;
-    }).join("");
-    return;
-  }
 
   host.innerHTML = list.map(i=>{
     const d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
@@ -604,7 +576,6 @@ function openLightbox(url){
 function closeLightbox(){ document.getElementById("lightbox").innerHTML=""; }
 
 function purchasesBlock(item){
-  if((item.status||"owned")==="watch") return ""; // la veille n'a pas de prix d'achat à répartir
   const lots = item.purchases || [];
   const totalQty = lots.reduce((s,l)=>s+l.qty,0);
   const totalCost = lots.reduce((s,l)=>s+l.price*l.qty,0);
@@ -637,7 +608,6 @@ function itemSheet(id){
   const i = S.items.find(x=>x.id===id); if(!i) return;
   openItem = id;
   const e = i.est, d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
-  const watch = (i.status||"owned")==="watch";
   const pts = e.points;
   const ps = pts.map(x=>x.price);
   const lo = Math.min(...ps, e.value ?? Infinity), hi = Math.max(...ps, e.value ?? 0);
@@ -682,7 +652,7 @@ function itemSheet(id){
     </div>`;
   openSheet(`
     <div class="sheet-head">
-      <div><span class="eyebrow">${watch?"En veille · ":""}${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
+      <div><span class="eyebrow">${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
         <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span> ${cardBadge(i.card_id)}</div>
       <button class="btn ghost" data-close-btn>Fermer</button>
     </div>
@@ -700,15 +670,11 @@ function itemSheet(id){
     ${historyChart(i)}
     ${statsBlock(i)}
     <hr class="sep">
-    ${watch ? `<div class="f3">
-      <div><span class="eyebrow">Objectif d'achat</span><div class="num" style="font-size:17px">${i.target_price?eur(i.target_price):"—"}</div></div>
-      <div><span class="eyebrow">Écart au marché</span><div class="num ${i.gap!=null&&i.gap<=0?"gain":"dim"}" style="font-size:17px">${i.gap!=null?pct(i.gap):"—"}</div></div>
-      <div><span class="eyebrow">Historique</span><div class="num" style="font-size:17px">${i.stats.span} j</div></div>
-    </div>` : `<div class="f3">
+    <div class="f3">
       <div><span class="eyebrow">Quantité</span><div class="num" style="font-size:17px">${i.qty}</div></div>
       <div><span class="eyebrow">Investi</span><div class="num" style="font-size:17px">${eur(i.cost)}</div></div>
       <div><span class="eyebrow">Plus-value</span><div class="num ${d>=0?"gain":"loss"}" style="font-size:17px">${eur(i.value-i.cost)} · ${pct(d)}</div></div>
-    </div>`}
+    </div>
     ${purchasesBlock(i)}
     ${i.notes?`<p class="note">${esc(i.notes)}</p>`:""}
     <hr class="sep">
@@ -728,16 +694,13 @@ function itemSheet(id){
     <div class="actions">
       <button class="btn danger ghost" data-del-item="${i.id}">Supprimer</button>
       <button class="btn" data-edit-item="${i.id}">Modifier</button>
-      ${watch ? `<button class="btn" data-buy="${i.id}">Je l'ai acheté</button>`
-              : `<button class="btn ghost" data-unbuy="${i.id}">Remettre en veille</button>
-                 <button class="btn ghost" data-transfer-to-stock="${i.id}">→ Stock (achat-revente)</button>`}
+      <button class="btn ghost" data-transfer-to-stock="${i.id}">→ Stock (achat-revente)</button>
       <button class="btn primary" data-add-comp="${i.id}">Ajouter le relevé</button>
     </div>`);
 }
 
 function itemForm(id){
   const i = id ? S.items.find(x=>x.id===id) : null;
-  const st = i ? (i.status||"owned") : mode;
   openSheet(`
     <div class="sheet-head"><div><span class="eyebrow">${i?"Modifier":"Nouvel item"}</span>
       <h2>${i?esc(i.name):"Ajouter au portefeuille"}</h2></div>
@@ -749,38 +712,15 @@ function itemForm(id){
       <label><span class="lb">Grade</span><input id="f-grade" value="${esc(i?.grade||"")}" placeholder="PSA 10"></label>
     </div>
     <label><span class="lb">Série / set</span><input id="f-set" value="${esc(i?.set_name||"")}" placeholder="EV02 · 151 · Destinées de Paldea"></label>
-    <label><span class="lb">Statut</span><select id="f-status">
-      <option value="owned" ${st==="owned"?"selected":""}>En portefeuille — je l'ai acheté</option>
-      <option value="watch" ${st==="watch"?"selected":""}>En veille — je surveille le prix</option>
-    </select></label>
     <div class="f3">
       <label><span class="lb">Quantité</span><input id="f-qty" type="number" inputmode="numeric" min="1" step="1" value="${i?.qty||1}" ${i?.purchases?.length?"disabled":""}></label>
       <label><span class="lb">Prix d'achat / u</span><input id="f-buy" type="number" inputmode="decimal" step="0.01" min="0" value="${i?.buy_price??""}" ${i?.purchases?.length?"disabled":""}></label>
       <label><span class="lb">Date d'achat</span><input id="f-date" type="date" value="${i?.buy_date||today()}"></label>
     </div>
     ${i?.purchases?.length ? `<p class="note">Quantité et prix d'achat sont recalculés automatiquement depuis les prix d'achat détaillés (visibles dans la fiche item). Gère-les depuis là plutôt qu'ici.</p>` : ""}
-    <label><span class="lb">Objectif d'achat (veille)</span><input id="f-target" type="number" inputmode="decimal" step="0.01" min="0"
-      value="${i?.target_price||""}" placeholder="le prix auquel tu serais acheteur"></label>
     <label><span class="lb">Notes</span><textarea id="f-notes" rows="2" placeholder="Où acheté, état du carton, objectif de revente…">${esc(i?.notes||"")}</textarea></label>
     <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
       <button class="btn primary" data-save-item="${i?.id||"new"}">${i?"Enregistrer":"Ajouter"}</button></div>
-  `,"center");
-}
-
-function buyForm(id){
-  const i = S.items.find(x=>x.id===id);
-  openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">Passage en portefeuille</span><h2>${esc(i.name)}</h2></div>
-      <button class="btn ghost" data-close-btn>Fermer</button></div>
-    <p class="note" style="margin-bottom:14px">Les relevés déjà accumulés sont conservés : ton historique de prix continue.</p>
-    <div class="f3">
-      <label><span class="lb">Prix payé / u</span><input id="b-price" type="number" inputmode="decimal" step="0.01" min="0"
-        value="${i.target_price||""}"></label>
-      <label><span class="lb">Quantité</span><input id="b-qty" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
-      <label><span class="lb">Date</span><input id="b-date" type="date" value="${today()}"></label>
-    </div>
-    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
-      <button class="btn primary" data-save-buy="${id}">Ajouter au portefeuille</button></div>
   `,"center");
 }
 
@@ -1734,9 +1674,9 @@ function pickACardSheet(res, budget){
         <b>${i+1}. ${esc(c.name)}</b>
         <span class="num gain" style="font-weight:700">${res.theoretical_mode ? pct(c.roi_net_pct) : pct(c.rendement_pct)+"/an"}</span>
       </div>
-      <div class="dim" style="font-size:12px;margin:4px 0">${c.kind==="sheet"?"🃏 Fiche carte":"◇ Veille"} · confiance ${c.confidence}</div>
+      <div class="dim" style="font-size:12px;margin:4px 0">🃏 Fiche carte · confiance ${c.confidence}</div>
       <p class="note" style="margin:0">${esc(c.reason)}</p>
-    </div>`).join("") : `<div class="empty"><b>Rien à proposer</b>Crée des fiches carte ou suis des items en veille pour que Pick a Card ait matière à comparer.</div>`;
+    </div>`).join("") : `<div class="empty"><b>Rien à proposer</b>Crée des fiches carte pour que Pick a Card ait matière à comparer.</div>`;
   const budgetBlock = res.budget ? `
     <hr class="sep"><span class="eyebrow">Combinaison pour ${eur(res.budget.amount)}</span>
     <p class="note">${res.budget.picks.length} carte(s), ${eur(res.budget.total_cost)} engagés, ${eur(res.budget.remaining)} restants.</p>
@@ -2069,7 +2009,7 @@ function cardPhotoBlock(c){
 
 async function cardEntrySheet(cardId){
   const c = await api("/api/cards/"+cardId);
-  const exLabels = {items:"Portefeuille/Veille", card_sheets:"Fiche carte", import_order_lines:"Ligne d'import", stock_items:"Stock"};
+  const exLabels = {items:"Portefeuille", card_sheets:"Fiche carte", import_order_lines:"Ligne d'import", stock_items:"Stock"};
   const rows = (c.exemplaires||[]).map(e=>`
     <div class="comp" style="grid-template-columns:1fr auto">
       <span>${exLabels[e.table]||e.table} — ${esc(e.label||"")}</span>
@@ -2337,7 +2277,7 @@ function renderQuickPickList(q){
       <div class="card-thumb">${thumbOf(i)}</div>
       <div class="card-body">
         <div class="card-title-row"><span class="card-title">${esc(i.name)}</span></div>
-        <div class="card-sub-row"><span><span class="tag t-${i.type}">${TYPES[i.type]}</span>${i.status==="watch"?" en veille":""}</span></div>
+        <div class="card-sub-row"><span><span class="tag t-${i.type}">${TYPES[i.type]}</span></span></div>
       </div>
     </button>`).join("") || `<p class="note">Aucun item ne correspond. Crée-le d'abord depuis le menu.</p>`;
 }
@@ -2403,25 +2343,12 @@ document.addEventListener("click", async ev=>{
       const g = x => document.getElementById(x).value.trim();
       if(!g("f-name")) return document.getElementById("f-name").focus();
       const body = {name:g("f-name"), type:g("f-type"), lang:g("f-lang"), grade:g("f-grade"),
-        set_name:g("f-set"), qty:g("f-qty"), buy_price:g("f-buy"), buy_date:g("f-date"), notes:g("f-notes"),
-        status:g("f-status"), target_price:g("f-target")};
+        set_name:g("f-set"), qty:g("f-qty"), buy_price:g("f-buy"), buy_date:g("f-date"), notes:g("f-notes")};
       const id = si.dataset.saveItem;
       await api(id==="new" ? "/api/items" : "/api/items/"+id, {json:body, method: id==="new"?"POST":"PUT"});
       closeSheet(); return refresh();
     }
     const ed = t.closest("[data-edit-item]"); if(ed) return itemForm(ed.dataset.editItem);
-
-    const bu = t.closest("[data-buy]"); if(bu) return buyForm(bu.dataset.buy);
-    const sb = t.closest("[data-save-buy]");
-    if(sb){
-      await api(`/api/items/${sb.dataset.saveBuy}/buy`, {json:{buy_price:document.getElementById("b-price").value,
-        qty:document.getElementById("b-qty").value, buy_date:document.getElementById("b-date").value}});
-      closeSheet(); mode = "owned";
-      document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c.dataset.mode==="owned"));
-      return refresh();
-    }
-    const ub = t.closest("[data-unbuy]");
-    if(ub){ await api(`/api/items/${ub.dataset.unbuy}/watch`,{method:"POST"}); closeSheet(); return refresh(); }
 
     const di = t.closest("[data-del-item]");
     if(di){
@@ -3028,8 +2955,8 @@ document.addEventListener("click", async ev=>{
     if(mchip){
       mode = mchip.dataset.mode;
       document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c===mchip));
-      document.getElementById("items-toolbar").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
-      document.getElementById("filters-items").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
+      document.getElementById("items-toolbar").style.display = mode==="owned" ? "flex" : "none";
+      document.getElementById("filters-items").style.display = mode==="owned" ? "flex" : "none";
       document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
       document.getElementById("card-filters").style.display = mode==="deals" ? "flex" : "none";
       document.getElementById("stock-toolbar").style.display = mode==="stock" ? "flex" : "none";

@@ -861,7 +861,10 @@ def build_state(snapshot: bool = True) -> dict:
         else:
             it["cost"] = it["buy_price"] * it["qty"]
         it["value"] = (it["est"]["value"] or 0) * it["qty"]
-        if it["status"] == "watch":                      # une veille ne pèse pas au bilan
+        # status='watch' : plus d'onglet Veille dédié, mais le statut reste utile pour
+        # les items créés par le Stock comme simple point d'attache des relevés
+        # (cf. /api/stock) — ceux-là ne doivent jamais peser dans le bilan.
+        if it["status"] == "watch":
             it["value"] = it["cost"] = 0.0
             it["gap"] = ((it["est"]["value"] - it["target_price"]) / it["target_price"] * 100
                          if it["target_price"] and it["est"]["value"] else None)
@@ -888,7 +891,6 @@ def build_state(snapshot: bool = True) -> dict:
             "pnl": value - invested,
             "net": value * (1 - s["fees"] / 100) - invested,
             "units": sum(i["qty"] for i in owned),
-            "watching": sum(1 for i in items if i["status"] == "watch"),
         },
     }
 
@@ -1120,30 +1122,6 @@ def api_settings(p: dict = Body(...)):
             s["weights"][k] = max(0.0, min(2.0, float(v)))
     put_settings(s)
     return s
-
-
-@app.post("/api/items/{iid}/buy")
-def api_buy(iid: str, p: dict = Body(...)):
-    """Fait passer un item de la veille au portefeuille."""
-    price = max(0.0, float(p.get("buy_price") or 0))
-    qty = max(1, int(p.get("qty") or 1))
-    when = str(p.get("buy_date") or date.today().isoformat())[:10]
-    with db() as con:
-        cur = con.execute(
-            "UPDATE items SET status='owned', buy_price=?, qty=?, buy_date=? WHERE id=?",
-            (price, qty, when, iid),
-        )
-        if not cur.rowcount:
-            raise HTTPException(404, "item introuvable")
-    return {"ok": True}
-
-
-@app.post("/api/items/{iid}/watch")
-def api_watch(iid: str):
-    """Renvoie un item en veille (achat annulé, revendu…)."""
-    with db() as con:
-        con.execute("UPDATE items SET status='watch' WHERE id=?", (iid,))
-    return {"ok": True}
 
 
 @app.post("/api/snapshot")
@@ -2693,12 +2671,6 @@ def _pick_a_card_candidates(st: dict, cs: dict) -> list[dict]:
     candidates = []
     with db() as con:
         sheets = [dict(r) for r in con.execute("SELECT * FROM card_sheets WHERE status='open'")]
-        # Items en veille créés automatiquement comme simple point d'attache
-        # pour les relevés du stock (aucun item_id fourni à la création d'une
-        # ligne) : ce ne sont pas des cartes à acheter, à exclure des candidats.
-        stock_linked_ids = {r["linked_item_id"] for r in con.execute(
-            "SELECT DISTINCT linked_item_id FROM stock_items WHERE linked_item_id IS NOT NULL"
-        )}
     fx_rate = fetch_jpy_eur_rate()
     for row in sheets:
         view = _card_sheet_view(row, items_by_id, cs, fx_rate)
@@ -2717,27 +2689,6 @@ def _pick_a_card_candidates(st: dict, cs: dict) -> list[dict]:
             "target_price": prudent["resale_price"], "est_value": item["est"]["value"] if item else None,
             "market_sales_per_month": item["stats"]["sales_month"] if item else None,
             "photo_url": view.get("photo_thumb_url"),
-        })
-    for item in st["items"]:
-        if item["status"] != "watch" or item["id"] in stock_linked_ids:
-            continue
-        est_val = item["est"]["value"]
-        if not est_val:
-            continue
-        best_net = None
-        for plat in card_deals_mod.SELL_PLATFORMS:
-            sf = cs["sell_fees"].get(plat, {})
-            n = card_deals_mod.net_from_resale(est_val, sf, 0.0)["net"]
-            if best_net is None or n > best_net:
-                best_net = n
-        cost_basis = item["target_price"] or est_val
-        candidates.append({
-            "kind": "watch", "id": item["id"], "name": item["name"],
-            "cost_basis": round(cost_basis, 2), "net_estime": best_net,
-            "linked_item_id": item["id"], "type": item["type"], "grade": item["grade"],
-            "target_price": item["target_price"] or None, "est_value": est_val,
-            "market_sales_per_month": item["stats"]["sales_month"],
-            "photo_url": ((item["photos"] or [{}])[0].get("thumb_url") if item.get("photos") else None),
         })
     return candidates
 
