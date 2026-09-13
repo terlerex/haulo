@@ -152,6 +152,7 @@ label{display:block;margin-bottom:12px}
 label .lb{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
 input,select,textarea{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:11px;min-height:44px}
+select{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
 textarea{min-height:auto}
 input:hover,select:hover{border-color:#3a3e44}
 .f2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
@@ -229,10 +230,8 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
       <span aria-hidden="true">+</span><span class="fab-label">Ajouter un relevé</span>
     </button>
     <button data-mode="owned" aria-pressed="true"><span class="ico">◆</span><span>Portefeuille</span></button>
-    <button data-mode="watch" aria-pressed="false"><span class="ico">◇</span><span>Veille <span id="watch-count"></span></span></button>
     <button data-mode="deals" aria-pressed="false"><span class="ico">⇄</span><span>Achat-revente</span></button>
     <button data-mode="stock" aria-pressed="false"><span class="ico">📦</span><span>Stock</span></button>
-    <button data-mode="studio" aria-pressed="false"><span class="ico">🎨</span><span>Studio</span></button>
     <button data-action="menu" aria-label="Menu"><span class="ico">⋯</span><span>Menu</span></button>
   </nav>
 
@@ -303,7 +302,6 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
 
     <div class="list" id="rows"></div>
     <div id="stock-body" style="display:none"></div>
-    <div id="studio-body" style="display:none"></div>
   </main>
 </div>
 
@@ -485,49 +483,21 @@ function renderCardDeals(){
 function renderRows(){
   if(mode==="deals") return renderCardDeals();
   if(mode==="stock") return renderStock();
-  if(mode==="studio") return;
   const host = document.getElementById("rows");
-  const pool = S.items.filter(i => (i.status||"owned")===mode);
-  document.getElementById("watch-count").textContent = S.totals.watching ? `(${S.totals.watching})` : "";
+  const pool = S.items.filter(i => (i.status||"owned")==="owned");
 
   const list = pool.filter(i =>
     (filter==="all" || i.type===filter) &&
     (!query || (i.name+" "+(i.set_name||"")+" "+(i.grade||"")).toLowerCase().includes(query))
-  ).sort((a,b)=> mode==="owned" ? b.value-a.value
-      : ((b.stats.sales_month??-1)-(a.stats.sales_month??-1)));
+  ).sort((a,b)=> b.value-a.value);
 
   if(!pool.length){
-    host.innerHTML = mode==="owned"
-      ? `<div class="empty"><b>Aucun item en portefeuille</b>
+    host.innerHTML = `<div class="empty"><b>Aucun item en portefeuille</b>
           Ajoute un display, une carte ou une gradée, puis colle tes relevés de prix.
-          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Ajouter un item</button></div></div>`
-      : `<div class="empty"><b>Rien sous surveillance</b>
-          Mets ici ce que tu n'as pas encore acheté. Ajoute des relevés au fil des semaines : tu verras la tendance et le rythme des ventes avant de te décider.
-          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Suivre un item</button></div></div>`;
+          <div style="margin-top:14px"><button class="btn primary" data-action="new-item">+ Ajouter un item</button></div></div>`;
     return;
   }
   if(!list.length){ host.innerHTML = `<div class="empty"><b>Rien ne correspond</b>Change le filtre ou la recherche.</div>`; return; }
-
-  if(mode==="watch"){
-    host.innerHTML = list.map(i=>{
-      const st = i.stats;
-      return `<button class="card-item" data-open="${i.id}">
-        <div class="card-thumb">${thumbOf(i)}</div>
-        <div class="card-body">
-          <div class="card-title-row">
-            <span class="card-title">${esc(i.name)}</span>
-            <span class="card-value">${eur(i.est.value)}</span>
-          </div>
-          <div class="card-sub-row">
-            <span><span class="tag t-${i.type}">${TYPES[i.type]}</span>
-              ${[i.set_name,i.grade].filter(Boolean).map(esc).join(" · ")}</span>
-            <span class="r">${trendBadge(st.trend30)} ${sales(st.sales_month)}</span>
-          </div>
-        </div>
-      </button>`;
-    }).join("");
-    return;
-  }
 
   host.innerHTML = list.map(i=>{
     const d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
@@ -604,7 +574,6 @@ function openLightbox(url){
 function closeLightbox(){ document.getElementById("lightbox").innerHTML=""; }
 
 function purchasesBlock(item){
-  if((item.status||"owned")==="watch") return ""; // la veille n'a pas de prix d'achat à répartir
   const lots = item.purchases || [];
   const totalQty = lots.reduce((s,l)=>s+l.qty,0);
   const totalCost = lots.reduce((s,l)=>s+l.price*l.qty,0);
@@ -637,7 +606,6 @@ function itemSheet(id){
   const i = S.items.find(x=>x.id===id); if(!i) return;
   openItem = id;
   const e = i.est, d = i.cost ? (i.value-i.cost)/i.cost*100 : null;
-  const watch = (i.status||"owned")==="watch";
   const pts = e.points;
   const ps = pts.map(x=>x.price);
   const lo = Math.min(...ps, e.value ?? Infinity), hi = Math.max(...ps, e.value ?? 0);
@@ -682,7 +650,7 @@ function itemSheet(id){
     </div>`;
   openSheet(`
     <div class="sheet-head">
-      <div><span class="eyebrow">${watch?"En veille · ":""}${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
+      <div><span class="eyebrow">${TYPES[i.type]}${i.grade?" · "+esc(i.grade):""}</span><h2>${esc(i.name)}</h2>
         <span class="dim" style="font-size:13px">${[i.set_name,i.lang].filter(Boolean).map(esc).join(" · ")}</span> ${cardBadge(i.card_id)}</div>
       <button class="btn ghost" data-close-btn>Fermer</button>
     </div>
@@ -700,15 +668,11 @@ function itemSheet(id){
     ${historyChart(i)}
     ${statsBlock(i)}
     <hr class="sep">
-    ${watch ? `<div class="f3">
-      <div><span class="eyebrow">Objectif d'achat</span><div class="num" style="font-size:17px">${i.target_price?eur(i.target_price):"—"}</div></div>
-      <div><span class="eyebrow">Écart au marché</span><div class="num ${i.gap!=null&&i.gap<=0?"gain":"dim"}" style="font-size:17px">${i.gap!=null?pct(i.gap):"—"}</div></div>
-      <div><span class="eyebrow">Historique</span><div class="num" style="font-size:17px">${i.stats.span} j</div></div>
-    </div>` : `<div class="f3">
+    <div class="f3">
       <div><span class="eyebrow">Quantité</span><div class="num" style="font-size:17px">${i.qty}</div></div>
       <div><span class="eyebrow">Investi</span><div class="num" style="font-size:17px">${eur(i.cost)}</div></div>
       <div><span class="eyebrow">Plus-value</span><div class="num ${d>=0?"gain":"loss"}" style="font-size:17px">${eur(i.value-i.cost)} · ${pct(d)}</div></div>
-    </div>`}
+    </div>
     ${purchasesBlock(i)}
     ${i.notes?`<p class="note">${esc(i.notes)}</p>`:""}
     <hr class="sep">
@@ -728,16 +692,13 @@ function itemSheet(id){
     <div class="actions">
       <button class="btn danger ghost" data-del-item="${i.id}">Supprimer</button>
       <button class="btn" data-edit-item="${i.id}">Modifier</button>
-      ${watch ? `<button class="btn" data-buy="${i.id}">Je l'ai acheté</button>`
-              : `<button class="btn ghost" data-unbuy="${i.id}">Remettre en veille</button>
-                 <button class="btn ghost" data-transfer-to-stock="${i.id}">→ Stock (achat-revente)</button>`}
+      <button class="btn ghost" data-transfer-to-stock="${i.id}">→ Stock (achat-revente)</button>
       <button class="btn primary" data-add-comp="${i.id}">Ajouter le relevé</button>
     </div>`);
 }
 
 function itemForm(id){
   const i = id ? S.items.find(x=>x.id===id) : null;
-  const st = i ? (i.status||"owned") : mode;
   openSheet(`
     <div class="sheet-head"><div><span class="eyebrow">${i?"Modifier":"Nouvel item"}</span>
       <h2>${i?esc(i.name):"Ajouter au portefeuille"}</h2></div>
@@ -749,38 +710,15 @@ function itemForm(id){
       <label><span class="lb">Grade</span><input id="f-grade" value="${esc(i?.grade||"")}" placeholder="PSA 10"></label>
     </div>
     <label><span class="lb">Série / set</span><input id="f-set" value="${esc(i?.set_name||"")}" placeholder="EV02 · 151 · Destinées de Paldea"></label>
-    <label><span class="lb">Statut</span><select id="f-status">
-      <option value="owned" ${st==="owned"?"selected":""}>En portefeuille — je l'ai acheté</option>
-      <option value="watch" ${st==="watch"?"selected":""}>En veille — je surveille le prix</option>
-    </select></label>
     <div class="f3">
       <label><span class="lb">Quantité</span><input id="f-qty" type="number" inputmode="numeric" min="1" step="1" value="${i?.qty||1}" ${i?.purchases?.length?"disabled":""}></label>
       <label><span class="lb">Prix d'achat / u</span><input id="f-buy" type="number" inputmode="decimal" step="0.01" min="0" value="${i?.buy_price??""}" ${i?.purchases?.length?"disabled":""}></label>
       <label><span class="lb">Date d'achat</span><input id="f-date" type="date" value="${i?.buy_date||today()}"></label>
     </div>
     ${i?.purchases?.length ? `<p class="note">Quantité et prix d'achat sont recalculés automatiquement depuis les prix d'achat détaillés (visibles dans la fiche item). Gère-les depuis là plutôt qu'ici.</p>` : ""}
-    <label><span class="lb">Objectif d'achat (veille)</span><input id="f-target" type="number" inputmode="decimal" step="0.01" min="0"
-      value="${i?.target_price||""}" placeholder="le prix auquel tu serais acheteur"></label>
     <label><span class="lb">Notes</span><textarea id="f-notes" rows="2" placeholder="Où acheté, état du carton, objectif de revente…">${esc(i?.notes||"")}</textarea></label>
     <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
       <button class="btn primary" data-save-item="${i?.id||"new"}">${i?"Enregistrer":"Ajouter"}</button></div>
-  `,"center");
-}
-
-function buyForm(id){
-  const i = S.items.find(x=>x.id===id);
-  openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">Passage en portefeuille</span><h2>${esc(i.name)}</h2></div>
-      <button class="btn ghost" data-close-btn>Fermer</button></div>
-    <p class="note" style="margin-bottom:14px">Les relevés déjà accumulés sont conservés : ton historique de prix continue.</p>
-    <div class="f3">
-      <label><span class="lb">Prix payé / u</span><input id="b-price" type="number" inputmode="decimal" step="0.01" min="0"
-        value="${i.target_price||""}"></label>
-      <label><span class="lb">Quantité</span><input id="b-qty" type="number" inputmode="numeric" min="1" step="1" value="1"></label>
-      <label><span class="lb">Date</span><input id="b-date" type="date" value="${today()}"></label>
-    </div>
-    <div class="actions"><button class="btn ghost" data-close-btn>Annuler</button>
-      <button class="btn primary" data-save-buy="${id}">Ajouter au portefeuille</button></div>
   `,"center");
 }
 
@@ -1734,9 +1672,9 @@ function pickACardSheet(res, budget){
         <b>${i+1}. ${esc(c.name)}</b>
         <span class="num gain" style="font-weight:700">${res.theoretical_mode ? pct(c.roi_net_pct) : pct(c.rendement_pct)+"/an"}</span>
       </div>
-      <div class="dim" style="font-size:12px;margin:4px 0">${c.kind==="sheet"?"🃏 Fiche carte":"◇ Veille"} · confiance ${c.confidence}</div>
+      <div class="dim" style="font-size:12px;margin:4px 0">🃏 Fiche carte · confiance ${c.confidence}</div>
       <p class="note" style="margin:0">${esc(c.reason)}</p>
-    </div>`).join("") : `<div class="empty"><b>Rien à proposer</b>Crée des fiches carte ou suis des items en veille pour que Pick a Card ait matière à comparer.</div>`;
+    </div>`).join("") : `<div class="empty"><b>Rien à proposer</b>Crée des fiches carte pour que Pick a Card ait matière à comparer.</div>`;
   const budgetBlock = res.budget ? `
     <hr class="sep"><span class="eyebrow">Combinaison pour ${eur(res.budget.amount)}</span>
     <p class="note">${res.budget.picks.length} carte(s), ${eur(res.budget.total_cost)} engagés, ${eur(res.budget.remaining)} restants.</p>
@@ -1752,293 +1690,6 @@ function pickACardSheet(res, budget){
     <div style="margin:10px 0">${list}</div>
     ${budgetBlock}
   `,"center");
-}
-
-/* ======================================================================= */
-/* Studio photo — détourage + fond déterministe, par lot                   */
-/* ======================================================================= */
-let studioJob = null;      // {job, pairs} du dernier lot chargé
-let studioPolling = null;  // id de setInterval pendant le traitement
-const BG_MODE_LABELS = {aplat:"Aplat uni", palette:"Palette", continuite:"Continuité"};
-const BG_COLOR_LABELS = {noir:"Noir", blanc:"Blanc", gris:"Gris"};
-
-function renderStudio(){
-  const host = document.getElementById("studio-body");
-  host.innerHTML = `
-    <span class="eyebrow">Studio photo</span>
-    <h2 style="margin:4px 0 14px">Détourage + fond automatique</h2>
-    <p class="note" style="margin-bottom:14px">Envoie tes photos recto/verso en vrac (jusqu'à 40) : détourage,
-      redressement et pose sur fond se font tout seuls. Traitement déterministe — pas d'IA générative,
-      pas de reconnaissance de la carte.</p>
-    <div class="f3">
-      <label><span class="lb">Type</span><select id="st-kind">
-        <option value="carte">Carte nue</option>
-        <option value="slab">Slab PSA</option>
-      </select></label>
-      <label><span class="lb">Fond</span><select id="st-bgmode">
-        <option value="aplat">Aplat uni</option>
-        <option value="palette">Palette (couleurs de la carte)</option>
-        <option value="continuite">Continuité (flou de la carte)</option>
-      </select></label>
-      <label id="st-bgcolor-wrap"><span class="lb">Couleur</span><select id="st-bgcolor">
-        <option value="noir">Noir</option>
-        <option value="blanc">Blanc</option>
-        <option value="gris">Gris</option>
-      </select></label>
-    </div>
-    <input type="file" id="st-files" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple hidden>
-    <div class="actions" style="justify-content:flex-start">
-      <button class="btn primary" data-studio-pick-files>+ Choisir des photos (jusqu'à 40)</button>
-      <span class="dim" id="st-files-count"></span>
-    </div>
-    <div id="studio-progress"></div>
-    <div id="studio-grid" style="margin-top:14px"></div>
-  `;
-  document.getElementById("st-bgmode").addEventListener("change", e=>{
-    document.getElementById("st-bgcolor-wrap").style.display = e.target.value==="aplat" ? "" : "none";
-  });
-  document.getElementById("st-files").addEventListener("change", e=>{
-    const n = e.target.files.length;
-    document.getElementById("st-files-count").textContent = n ? `${n} photo${n>1?"s":""} sélectionnée${n>1?"s":""}` : "";
-  });
-}
-
-async function studioUpload(){
-  const files = document.getElementById("st-files").files;
-  if(!files.length) return alert("Choisis au moins une photo.");
-  if(files.length > 40) return alert("40 photos maximum par envoi.");
-  const kind = document.getElementById("st-kind").value;
-  const bgMode = document.getElementById("st-bgmode").value;
-  const bgColor = document.getElementById("st-bgcolor").value;
-  const fd = new FormData();
-  for(const f of files) fd.append("files", f);
-  document.getElementById("studio-progress").innerHTML = `<p class="note">Envoi en cours…</p>`;
-  let res;
-  try{
-    res = await fetch(`/api/studio/jobs?kind=${kind}&bg_mode=${bgMode}&bg_color=${bgColor}`,
-      {method:"POST", body:fd, credentials:"same-origin"});
-    if(!res.ok) throw new Error(await res.text());
-    res = await res.json();
-  }catch(err){
-    document.getElementById("studio-progress").innerHTML = `<p class="note">Échec de l'envoi : ${esc(String(err))}</p>`;
-    return;
-  }
-  document.getElementById("st-files").value = "";
-  document.getElementById("st-files-count").textContent = "";
-  studioPollJob(res.job_id);
-}
-
-function studioPollJob(jobId){
-  if(studioPolling) clearInterval(studioPolling);
-  const tick = async ()=>{
-    const data = await api(`/api/studio/jobs/${jobId}`);
-    studioJob = data;
-    renderStudioProgress(data.job);
-    renderStudioGrid(data.pairs, data.job);
-    if(data.job.status==="done"){ clearInterval(studioPolling); studioPolling=null; }
-  };
-  tick();
-  studioPolling = setInterval(tick, 1500);
-}
-
-function renderStudioProgress(job){
-  const host = document.getElementById("studio-progress");
-  if(job.status==="done"){ host.innerHTML = ""; return; }
-  const pct = job.total ? Math.round(job.processed/job.total*100) : 0;
-  host.innerHTML = `
-    <div style="background:var(--panel2);border-radius:99px;height:10px;overflow:hidden;margin:12px 0 6px">
-      <div style="background:var(--accent);height:100%;width:${pct}%;transition:width .3s"></div>
-    </div>
-    <p class="note">${job.processed} / ${job.total} traitées</p>`;
-}
-
-function studioConfBadge(v){
-  if(v==null) return "";
-  const cls = v < photostudioReviewThreshold ? "loss" : "gain";
-  return `<span class="${cls}" style="font-size:12px;font-weight:600">${Math.round(v*100)}%</span>`;
-}
-const photostudioReviewThreshold = 0.55;
-
-function renderStudioGrid(pairs, job){
-  const host = document.getElementById("studio-grid");
-  if(!pairs.length){ host.innerHTML = ""; return; }
-  host.innerHTML = `
-    <span class="eyebrow">Relecture (${pairs.length}) — douteuses en tête</span>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin:10px 0">
-      ${pairs.map(p=>studioCard(p, job)).join("")}
-    </div>
-    <div class="actions" style="justify-content:flex-start;margin-top:10px">
-      <button class="btn primary" data-studio-export="${job.id}">Télécharger le ZIP de la sélection</button>
-      <label style="display:flex;align-items:center;gap:6px;min-height:auto">
-        <input type="checkbox" id="st-select-all" style="width:auto;min-height:auto"> Tout sélectionner
-      </label>
-    </div>`;
-  document.getElementById("st-select-all")?.addEventListener("change", e=>{
-    host.querySelectorAll(".st-select").forEach(cb=> cb.checked = e.target.checked);
-  });
-}
-
-function studioCard(p, job){
-  const warn = p.status==="needs_review" ? `<div class="warn" style="margin:6px 0">⚠ à revoir</div>` : "";
-  const err = p.status==="error" ? `<div class="warn" style="margin:6px 0">✕ échec du traitement</div>` : "";
-  const thumb = p.urls.recto ? `<img src="${p.urls.recto.jpg}" alt="" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;border:1px solid var(--line)">`
-    : `<div style="width:100%;aspect-ratio:1;border-radius:8px;background:var(--panel2)"></div>`;
-  return `<div class="card-item" style="flex-direction:column;align-items:stretch;cursor:default" data-studio-pair="${p.id}">
-    <label style="display:flex;justify-content:flex-end;min-height:auto;margin-bottom:4px">
-      <input type="checkbox" class="st-select" data-pair-checkbox="${p.id}" style="width:auto;min-height:auto"></label>
-    ${thumb}
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
-      <span class="dim" style="font-size:11px">recto ${studioConfBadge(p.recto_confidence)}${p.verso_confidence!=null?` · verso ${studioConfBadge(p.verso_confidence)}`:""}</span>
-    </div>
-    ${warn}${err}
-    <div class="actions" style="justify-content:flex-start;margin-top:8px;gap:6px">
-      <button class="btn" data-studio-corners="${p.id}" title="Corriger le détourage à la main">Coins</button>
-      <button class="btn" data-studio-bgpicker="${p.id}" title="Changer le mode de fond">Fond</button>
-      <button class="btn" data-studio-attach-picker="${p.id}" title="Rattacher au stock ou au référentiel">Rattacher</button>
-      <button class="btn danger ghost" data-studio-discard="${p.id}" title="Écarter">Écarter</button>
-    </div>
-  </div>`;
-}
-
-function studioBgSheet(pid){
-  const p = studioJob.pairs.find(x=>x.id===pid);
-  openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">Fond</span><h2>Changer le mode</h2></div>
-      <button class="btn ghost" data-close-btn>Fermer</button></div>
-    <div class="f2">
-      <label><span class="lb">Mode</span><select id="stbg-mode">
-        ${Object.entries(BG_MODE_LABELS).map(([k,l])=>`<option value="${k}" ${p.bg_mode===k?"selected":""}>${l}</option>`).join("")}
-      </select></label>
-      <label id="stbg-color-wrap" style="${p.bg_mode==="aplat"?"":"display:none"}"><span class="lb">Couleur</span><select id="stbg-color">
-        ${Object.entries(BG_COLOR_LABELS).map(([k,l])=>`<option value="${k}" ${p.bg_color===k?"selected":""}>${l}</option>`).join("")}
-      </select></label>
-    </div>
-    <div class="actions"><button class="btn primary" data-studio-save-bg="${pid}" style="width:100%">Appliquer</button></div>
-  `,"center");
-  document.getElementById("stbg-mode").addEventListener("change", e=>{
-    document.getElementById("stbg-color-wrap").style.display = e.target.value==="aplat" ? "" : "none";
-  });
-}
-
-function studioAttachSheet(pid){
-  const openOrders = (cardDeals?.import_orders||[]);
-  openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">Rattacher</span><h2>Où ranger ce rendu ?</h2></div>
-      <button class="btn ghost" data-close-btn>Fermer</button></div>
-    <p class="note">La photo recto devient celle de la ligne de stock ou de la carte choisie.</p>
-    <div style="margin:8px 0">${(stockData?.stock||[]).slice(0,30).map(r=>`
-      <div class="comp" style="cursor:pointer" data-studio-do-attach="${pid}" data-stock-id="${r.id}"><span>${esc(r.name)}</span><span class="dim">Stock</span></div>`).join("")}
-    </div>
-  `,"center");
-}
-
-async function studioApplyBg(pid){
-  const bgMode = document.getElementById("stbg-mode").value;
-  const bgColor = document.getElementById("stbg-color").value;
-  await api(`/api/studio/pairs/${pid}/background`, {method:"PUT", json:{bg_mode:bgMode, bg_color:bgColor}});
-  closeSheet();
-  studioPollJob(studioJob.job.id);
-}
-
-/* ---------------- éditeur de coins (redressement manuel) ---------------- */
-let cornerEditorState = null; // {pid, side, img, scale, points:[{x,y}x4], dragging}
-
-async function studioCornersSheet(pid){
-  const p = studioJob.pairs.find(x=>x.id===pid);
-  const side = p.urls.recto ? "recto" : "verso";
-  openSheet(`
-    <div class="sheet-head"><div><span class="eyebrow">Détourage manuel</span><h2>Déplace les 4 coins</h2></div>
-      <button class="btn ghost" data-close-btn>Fermer</button></div>
-    <p class="note">Glisse chaque coin sur les bords réels de la carte, puis valide pour redresser et recomposer.</p>
-    <div class="f2" style="margin-bottom:10px"><label><span class="lb">Côté</span><select id="ce-side">
-      ${p.recto_quad?`<option value="recto" ${side==="recto"?"selected":""}>Recto</option>`:""}
-      ${p.verso_quad?`<option value="verso" ${side==="verso"?"selected":""}>Verso</option>`:""}
-    </select></label></div>
-    <canvas id="ce-canvas" style="width:100%;touch-action:none;border-radius:8px;border:1px solid var(--line);cursor:crosshair"></canvas>
-    <div class="actions"><button class="btn primary" data-studio-save-corners="${pid}" style="width:100%">Valider</button></div>
-  `,"center");
-  document.getElementById("ce-side").addEventListener("change", e=> loadCornerEditor(pid, e.target.value));
-  await loadCornerEditor(pid, side);
-}
-
-async function loadCornerEditor(pid, side){
-  const p = studioJob.pairs.find(x=>x.id===pid);
-  const quad = side==="recto" ? p.recto_quad : p.verso_quad;
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  await new Promise(resolve=>{
-    img.onload = resolve;
-    img.src = `/api/studio/pairs/${pid}/raw/${side}?t=${Date.now()}`;
-  });
-  const canvas = document.getElementById("ce-canvas");
-  const displayW = Math.min(560, img.naturalWidth);
-  const scale = displayW / img.naturalWidth;
-  canvas.width = displayW;
-  canvas.height = Math.round(img.naturalHeight * scale);
-  cornerEditorState = {
-    pid, side, img, scale,
-    points: quad.map(([x,y])=>({x:x*scale, y:y*scale})),
-    dragging: -1,
-  };
-  drawCornerEditor();
-  wireCornerEditorEvents();
-}
-
-function drawCornerEditor(){
-  const st = cornerEditorState;
-  const canvas = document.getElementById("ce-canvas");
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.drawImage(st.img, 0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = "#3EDC7B"; ctx.lineWidth = 2;
-  ctx.beginPath();
-  st.points.forEach((pt,i)=> i===0 ? ctx.moveTo(pt.x,pt.y) : ctx.lineTo(pt.x,pt.y));
-  ctx.closePath(); ctx.stroke();
-  st.points.forEach(pt=>{
-    ctx.beginPath(); ctx.arc(pt.x, pt.y, 9, 0, Math.PI*2);
-    ctx.fillStyle = "rgba(62,220,123,.9)"; ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = "#06120B"; ctx.stroke();
-  });
-}
-
-function wireCornerEditorEvents(){
-  const canvas = document.getElementById("ce-canvas");
-  const posFromEvent = e=>{
-    const r = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / r.width, scaleY = canvas.height / r.height;
-    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
-    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
-    return {x: cx*scaleX, y: cy*scaleY};
-  };
-  const down = e=>{
-    const pos = posFromEvent(e);
-    const st = cornerEditorState;
-    let best=-1, bestD=26;
-    st.points.forEach((pt,i)=>{
-      const d = Math.hypot(pt.x-pos.x, pt.y-pos.y);
-      if(d<bestD){ bestD=d; best=i; }
-    });
-    st.dragging = best;
-  };
-  const move = e=>{
-    const st = cornerEditorState;
-    if(st.dragging<0) return;
-    e.preventDefault();
-    const pos = posFromEvent(e);
-    st.points[st.dragging] = {x: Math.max(0,Math.min(canvas.width,pos.x)), y: Math.max(0,Math.min(canvas.height,pos.y))};
-    drawCornerEditor();
-  };
-  const up = ()=>{ cornerEditorState.dragging = -1; };
-  canvas.onmousedown = down; canvas.onmousemove = move; canvas.onmouseup = up; canvas.onmouseleave = up;
-  canvas.ontouchstart = down; canvas.ontouchmove = move; canvas.ontouchend = up;
-}
-
-async function studioSaveCorners(pid){
-  const st = cornerEditorState;
-  const quad = st.points.map(pt=>[pt.x/st.scale, pt.y/st.scale]);
-  await api(`/api/studio/pairs/${pid}/corners`, {method:"PUT", json:{side:st.side, quad}});
-  closeSheet();
-  studioPollJob(studioJob.job.id);
 }
 
 /* ======================================================================= */
@@ -2069,7 +1720,7 @@ function cardPhotoBlock(c){
 
 async function cardEntrySheet(cardId){
   const c = await api("/api/cards/"+cardId);
-  const exLabels = {items:"Portefeuille/Veille", card_sheets:"Fiche carte", import_order_lines:"Ligne d'import", stock_items:"Stock"};
+  const exLabels = {items:"Portefeuille", card_sheets:"Fiche carte", import_order_lines:"Ligne d'import", stock_items:"Stock"};
   const rows = (c.exemplaires||[]).map(e=>`
     <div class="comp" style="grid-template-columns:1fr auto">
       <span>${exLabels[e.table]||e.table} — ${esc(e.label||"")}</span>
@@ -2100,6 +1751,8 @@ async function cardEntrySheet(cardId){
         ${Object.entries(SELL_PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${c.default_resale_platform===k?"selected":""}>${l}</option>`).join("")}
       </select></label>
     </div>
+    <label><span class="lb">Nom original</span><input id="ce-nomalt" value="${esc(c.nom_alternatif||"")}" placeholder="ピカチュウ"></label>
+    <p class="note" style="margin-top:4px">Repris automatiquement sur chaque nouvel exemplaire créé depuis le sélecteur — à ne saisir qu'une fois ici.</p>
     <div class="actions" style="justify-content:flex-start"><button class="btn" data-save-card-defaults="${c.id}">Enregistrer</button></div>
     <hr class="sep">
     <div class="actions" style="justify-content:flex-start">
@@ -2209,6 +1862,7 @@ async function pickCard(card){
       name:card.name, set_name:card.set_name, card_number:card.card_number, lang:card.lang||"FR",
       type:card.type, grade:card.grade, card_id:card.id, cost_basis:0,
       target_price:card.resale_target_eur, target_platform:card.default_resale_platform,
+      nom_alternatif:card.nom_alternatif||"",
     }});
     await loadStock();
   }
@@ -2337,7 +1991,7 @@ function renderQuickPickList(q){
       <div class="card-thumb">${thumbOf(i)}</div>
       <div class="card-body">
         <div class="card-title-row"><span class="card-title">${esc(i.name)}</span></div>
-        <div class="card-sub-row"><span><span class="tag t-${i.type}">${TYPES[i.type]}</span>${i.status==="watch"?" en veille":""}</span></div>
+        <div class="card-sub-row"><span><span class="tag t-${i.type}">${TYPES[i.type]}</span></span></div>
       </div>
     </button>`).join("") || `<p class="note">Aucun item ne correspond. Crée-le d'abord depuis le menu.</p>`;
 }
@@ -2403,25 +2057,12 @@ document.addEventListener("click", async ev=>{
       const g = x => document.getElementById(x).value.trim();
       if(!g("f-name")) return document.getElementById("f-name").focus();
       const body = {name:g("f-name"), type:g("f-type"), lang:g("f-lang"), grade:g("f-grade"),
-        set_name:g("f-set"), qty:g("f-qty"), buy_price:g("f-buy"), buy_date:g("f-date"), notes:g("f-notes"),
-        status:g("f-status"), target_price:g("f-target")};
+        set_name:g("f-set"), qty:g("f-qty"), buy_price:g("f-buy"), buy_date:g("f-date"), notes:g("f-notes")};
       const id = si.dataset.saveItem;
       await api(id==="new" ? "/api/items" : "/api/items/"+id, {json:body, method: id==="new"?"POST":"PUT"});
       closeSheet(); return refresh();
     }
     const ed = t.closest("[data-edit-item]"); if(ed) return itemForm(ed.dataset.editItem);
-
-    const bu = t.closest("[data-buy]"); if(bu) return buyForm(bu.dataset.buy);
-    const sb = t.closest("[data-save-buy]");
-    if(sb){
-      await api(`/api/items/${sb.dataset.saveBuy}/buy`, {json:{buy_price:document.getElementById("b-price").value,
-        qty:document.getElementById("b-qty").value, buy_date:document.getElementById("b-date").value}});
-      closeSheet(); mode = "owned";
-      document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c.dataset.mode==="owned"));
-      return refresh();
-    }
-    const ub = t.closest("[data-unbuy]");
-    if(ub){ await api(`/api/items/${ub.dataset.unbuy}/watch`,{method:"POST"}); closeSheet(); return refresh(); }
 
     const di = t.closest("[data-del-item]");
     if(di){
@@ -2540,7 +2181,8 @@ document.addEventListener("click", async ev=>{
       const cid = scd.dataset.saveCardDefaults;
       const c = await api("/api/cards/"+cid);
       const body = {...c, resale_target_eur: document.getElementById("ce-target").value||null,
-                    default_resale_platform: document.getElementById("ce-platform").value||null};
+                    default_resale_platform: document.getElementById("ce-platform").value||null,
+                    nom_alternatif: document.getElementById("ce-nomalt").value};
       await api("/api/cards/"+cid, {method:"PUT", json:body});
       return cardEntrySheet(cid);
     }
@@ -2553,6 +2195,7 @@ document.addEventListener("click", async ev=>{
         name:c.name, set_name:c.set_name, card_number:c.card_number, lang:c.lang||"FR",
         type:c.type, grade:c.grade, card_id:c.id, cost_basis:0,
         target_price:c.resale_target_eur, target_platform:c.default_resale_platform,
+        nom_alternatif:c.nom_alternatif||"",
       }});
       await loadStock();
       return stockSheet(r.id);
@@ -2645,41 +2288,6 @@ document.addEventListener("click", async ev=>{
       await loadStock();
       svl.textContent = "Enregistré !";
       setTimeout(()=>{ svl.textContent = "Enregistrer les modifications"; }, 1200);
-      return;
-    }
-
-    // --- Studio photo ---
-    if(t.closest("[data-studio-pick-files]")){
-      const fi = document.getElementById("st-files");
-      fi.onchange = studioUpload;
-      return fi.click();
-    }
-    const stc = t.closest("[data-studio-corners]"); if(stc) return studioCornersSheet(stc.dataset.studioCorners);
-    const stbgp = t.closest("[data-studio-bgpicker]"); if(stbgp) return studioBgSheet(stbgp.dataset.studioBgpicker);
-    const stap = t.closest("[data-studio-attach-picker]"); if(stap) return studioAttachSheet(stap.dataset.studioAttachPicker);
-    const stsb = t.closest("[data-studio-save-bg]"); if(stsb) return studioApplyBg(stsb.dataset.studioSaveBg);
-    const stsc = t.closest("[data-studio-save-corners]"); if(stsc) return studioSaveCorners(stsc.dataset.studioSaveCorners);
-    const stda = t.closest("[data-studio-do-attach]");
-    if(stda){
-      await api(`/api/studio/pairs/${stda.dataset.studioDoAttach}/attach`,{method:"POST",json:{stock_id:stda.dataset.stockId}});
-      closeSheet(); studioPollJob(studioJob.job.id); return;
-    }
-    const std = t.closest("[data-studio-discard]");
-    if(std){
-      if(!confirm("Écarter ce rendu ? Les fichiers seront supprimés.")) return;
-      await api(`/api/studio/pairs/${std.dataset.studioDiscard}/discard`,{method:"POST"});
-      studioPollJob(studioJob.job.id); return;
-    }
-    const ste = t.closest("[data-studio-export]");
-    if(ste){
-      const ids = [...document.querySelectorAll(".st-select:checked")].map(cb=>cb.dataset.pairCheckbox);
-      if(!ids.length) return alert("Sélectionne au moins un rendu.");
-      const r = await fetch(`/api/studio/jobs/${ste.dataset.studioExport}/export`,
-        {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({pair_ids:ids}), credentials:"same-origin"});
-      const blob = await r.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob); a.download = `studio-${ste.dataset.studioExport}.zip`; a.click();
-      URL.revokeObjectURL(a.href);
       return;
     }
 
@@ -3028,21 +2636,19 @@ document.addEventListener("click", async ev=>{
     if(mchip){
       mode = mchip.dataset.mode;
       document.querySelectorAll("[data-mode]").forEach(c=>c.setAttribute("aria-pressed", c===mchip));
-      document.getElementById("items-toolbar").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
-      document.getElementById("filters-items").style.display = (mode==="owned"||mode==="watch") ? "flex" : "none";
+      document.getElementById("items-toolbar").style.display = mode==="owned" ? "flex" : "none";
+      document.getElementById("filters-items").style.display = mode==="owned" ? "flex" : "none";
       document.getElementById("deal-toolbar").style.display = mode==="deals" ? "flex" : "none";
       document.getElementById("card-filters").style.display = mode==="deals" ? "flex" : "none";
       document.getElementById("stock-toolbar").style.display = mode==="stock" ? "flex" : "none";
       document.getElementById("stock-tabs").style.display = mode==="stock" ? "flex" : "none";
       document.getElementById("stock-hero").style.display = mode==="stock" ? "block" : "none";
-      document.querySelector("section.hero:not(#stock-hero)").style.display = (mode==="stock"||mode==="studio") ? "none" : "block";
-      document.getElementById("rows").style.display = (mode==="stock"||mode==="studio") ? "none" : "flex";
+      document.querySelector("section.hero:not(#stock-hero)").style.display = mode==="stock" ? "none" : "block";
+      document.getElementById("rows").style.display = mode==="stock" ? "none" : "flex";
       document.getElementById("stock-body").style.display = mode==="stock" ? "block" : "none";
-      document.getElementById("studio-body").style.display = mode==="studio" ? "block" : "none";
-      document.querySelector("main.content").classList.toggle("full-width", mode==="stock"||mode==="studio");
+      document.querySelector("main.content").classList.toggle("full-width", mode==="stock");
       if(mode==="deals" && !cardDeals) await loadCardDeals();
       if(mode==="stock" && !stockData) await loadStock();
-      if(mode==="studio") renderStudio();
       return renderRows();
     }
     const sfChip = t.closest("[data-stock-filter]");
