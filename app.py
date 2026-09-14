@@ -1550,7 +1550,8 @@ def api_list_card_deals():
                 "buy_max_computed": c["buy_max_computed"],
                 **_card_photo_urls(c),
             }
-            row["sent_to_stock"] = bool(stock_count_by_line.get(row["id"]))
+            row["stock_count"] = stock_count_by_line.get(row["id"], 0)
+            row["sent_to_stock"] = bool(row["stock_count"])
             # Alerte de dépassement : jamais bloquante, juste visible tout de
             # suite sur la ligne (montant en rouge côté frontend) plutôt qu'à
             # la réception du colis. Comparé au coût tout compris (landed,
@@ -2095,7 +2096,8 @@ def api_realize_order_line(lid: str, p: dict = Body(...)):
             "SELECT * FROM import_order_lines WHERE order_id=? ORDER BY sort_order", (line["order_id"],)
         )]
     cs = get_card_settings()
-    computed = card_deals_mod.build_import_order_view(order, lines, cs, order["fx_rate"])
+    fx_rate = order["fx_rate"] or fetch_jpy_eur_rate()
+    computed = card_deals_mod.build_import_order_view(order, lines, cs, fx_rate)
     row = next((r for r in computed["lines"] if r["id"] == lid), None)
     unit_cost = float(p["buy_price"]) if p.get("buy_price") not in (None, "") else (row["unit_landed_cost"] if row else 0.0)
     qty = max(1, int(p.get("qty") or line["qty"]))
@@ -2640,14 +2642,33 @@ def api_line_to_stock(lid: str):
     réellement facturés si la commande est reçue avec des frais réels saisis
     — jamais le seul prix d'article. qty>1 -> un stock_item par exemplaire,
     répartis au centime près (même logique que le total de la commande) pour
-    que leur somme reconstitue exactement le coût de la ligne."""
+    que leur somme reconstitue exactement le coût de la ligne.
+
+    Rejouable : si des exemplaires existent déjà pour cette ligne (transfert
+    précédent, ou quantité augmentée depuis), ne crée que les exemplaires
+    MANQUANTS (qty - déjà créés). Le coût des exemplaires déjà créés n'est
+    jamais réécrit (coût de revient réel, figé une fois constaté) ; les
+    nouveaux se partagent ce qui reste du coût de revient actuel de la ligne
+    une fois la part des exemplaires existants déduite, pour que la somme de
+    tous les exemplaires (anciens + nouveaux) reconstitue le coût actuel de
+    la ligne au centime près."""
     with db() as con:
         line = con.execute("SELECT * FROM import_order_lines WHERE id=?", (lid,)).fetchone()
         if not line:
             raise HTTPException(404, "ligne introuvable")
         line = dict(line)
-        if con.execute("SELECT 1 FROM stock_items WHERE source_order_line_id=?", (lid,)).fetchone():
-            raise HTTPException(400, "cette ligne a déjà été envoyée au stock")
+        existing = [dict(r) for r in con.execute(
+            "SELECT * FROM stock_items WHERE source_order_line_id=?", (lid,)
+        )]
+        qty = max(1, int(line["qty"]))
+        missing = qty - len(existing)
+        if missing <= 0:
+            raise HTTPException(
+                400,
+                "tous les exemplaires de cette ligne existent déjà dans le stock" if missing == 0
+                else "il y a déjà plus d'exemplaires en stock que la quantité de la ligne — "
+                     "augmente la quantité ou retire des exemplaires d'abord",
+            )
         order = dict(con.execute("SELECT * FROM import_orders WHERE id=?", (line["order_id"],)).fetchone())
         lines = [dict(r) for r in con.execute(
             "SELECT * FROM import_order_lines WHERE order_id=? ORDER BY sort_order", (line["order_id"],)
@@ -2657,13 +2678,24 @@ def api_line_to_stock(lid: str):
             crow = con.execute("SELECT * FROM cards WHERE id=?", (line["card_id"],)).fetchone()
             card = dict(crow) if crow else None
     cs = get_card_settings()
-    computed = card_deals_mod.build_import_order_view(order, lines, cs, order["fx_rate"])
+    # order["fx_rate"] n'est figé qu'au passage "commandée" : pour une commande
+    # encore "brouillon", il vaut None, et sans repli ici, toute ligne en ¥
+    # tomberait silencieusement à un coût de 0 (même principe que la vue
+    # liste, cf. fetch_jpy_eur_rate).
+    fx_rate = order["fx_rate"] or fetch_jpy_eur_rate()
+    computed = card_deals_mod.build_import_order_view(order, lines, cs, fx_rate)
     row = next((r for r in computed["lines"] if r["id"] == lid), None)
     if not row:
         raise HTTPException(400, "impossible de calculer le coût de cette ligne")
-    qty = max(1, int(line["qty"]))
-    per_unit_cost = (card_deals_mod._round_alloc(row["landed_total"], [1.0] * qty)
-                      if qty > 1 else [row["landed_total"]])
+    existing_sum = round(sum(float(r["cost_basis"] or 0) for r in existing), 2)
+    # Plancher à 0 : si le coût de revient actuel de la ligne a baissé sous ce
+    # que les exemplaires déjà créés portent déjà (autre ligne corrigée entre
+    # temps, par exemple), il n'y a plus rien à répartir sur les nouveaux —
+    # jamais un coût négatif, l'écart reste visible sur les exemplaires
+    # existants (buy_over_max) plutôt que d'être maquillé ici.
+    remaining = max(0.0, round(row["landed_total"] - existing_sum, 2))
+    per_unit_cost = (card_deals_mod._round_alloc(remaining, [1.0] * missing)
+                      if missing > 1 else [remaining])
     name = card["name"] if card else (line["name"] or "Carte sans nom")
     set_name = card["set_name"] if card else ""
     card_number = card["card_number"] if card else ""
