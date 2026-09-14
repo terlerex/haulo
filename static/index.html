@@ -1010,10 +1010,10 @@ function orderLineRow(l, order){
       <span class="${costCls}">${eur(l.unit_landed_cost)}</span>
       <span class="${l.profit_pct==null?'dim':flagged?'loss':'gain'}" style="font-size:12px">${l.profit_pct!=null?pct(l.profit_pct):"—"}</span>
       <span>
-        <button class="x" data-toggle-line="${l.id}" title="Détail (devise, montant, revente visée)">⚙</button>
+        <button class="x" data-toggle-line="${l.id}" title="Détail (devise, montant, quantité, revente visée)">⚙</button>
         ${order.status==="recue" && !l.item_id ? `<button class="x" data-realize-line="${l.id}" title="Basculer au portefeuille">↦</button>` : ""}
-        ${order.status==="recue" && !l.sent_to_stock ? `<button class="x" data-line-to-stock="${l.id}" title="Envoyer au stock, au coût de revient calculé">📦</button>` : ""}
-        ${l.sent_to_stock ? `<span class="dim" style="font-size:10px" title="Déjà envoyée au stock">📦✓</span>` : ""}
+        ${order.status==="recue" && l.qty>(l.stock_count||0) ? `<button class="x" data-line-to-stock="${l.id}" title="${l.stock_count?`Créer les ${l.qty-l.stock_count} exemplaire(s) manquant(s) dans le stock`:"Envoyer au stock, au coût de revient calculé"}">📦${l.stock_count?"+":""}</button>` : ""}
+        ${l.sent_to_stock && l.qty<=(l.stock_count||0) ? `<span class="dim" style="font-size:10px" title="${l.stock_count} exemplaire(s) déjà en stock">📦✓ ${l.stock_count}</span>` : ""}
         <button class="x" data-del-line="${l.id}" title="Supprimer">✕</button>
       </span>
     </div>
@@ -1027,7 +1027,9 @@ function orderLineRow(l, order){
           step="${l.unit_currency==="EUR"?"0.01":"1"}"
           value="${l.unit_currency==="EUR"?(l.unit_price_eur??""):(l.unit_price_jpy??"")}"></label>
       </div>
-      <div class="f2" style="margin:0 0 10px">
+      <label><span class="lb">Quantité${l.stock_count?` <span class="dim" style="text-transform:none">(${l.stock_count} déjà en stock)</span>`:""}</span>
+        <input id="ole-qty-${l.id}" type="number" min="1" step="1" value="${l.qty}"></label>
+      <div class="f2" style="margin:10px 0">
         <label><span class="lb">Revente visée (€)${l.resale_target_overridden?` <span class="tag t-scelle" style="font-size:9px">modifié</span>`:""}</span>
           <input id="ole-resale-${l.id}" type="number" min="0" step="0.01" value="${l.resale_target_eur??""}"></label>
         <label><span class="lb">Plateforme</span><select id="ole-platform-${l.id}">
@@ -1038,6 +1040,28 @@ function orderLineRow(l, order){
       ${l.card_id && l.resale_target_overridden ? `<button class="btn ghost" data-reset-line-resale="${l.id}" style="width:100%;margin-bottom:10px">↺ Revenir à la valeur de la fiche</button>` : ""}
       <button class="btn" data-save-line-detail="${l.id}" data-order="${order.id}" style="width:100%">Enregistrer le détail</button>
     </div>`;
+}
+
+function lineStockReconcileSheet(lid, oid){
+  const order = cardDeals.import_orders.find(x=>x.id===oid);
+  const line = order?.lines.find(l=>l.id===lid);
+  const items = (stockData?.stock||[]).filter(s=>s.source_order_line_id===lid);
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Quantité réduite</span><h2>${esc(line?.name||"Ligne")}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">La quantité de la ligne est passée à ${line?.qty} alors que ${items.length} exemplaire${items.length>1?"s":""}
+      ${items.length>1?"sont":"est"} déjà en stock. Rien n'a été supprimé automatiquement — choisis ci-dessous lesquels retirer, ou ferme sans rien faire pour garder tous les exemplaires (la quantité de la ligne restera simplement inférieure au nombre d'exemplaires en stock).</p>
+    <div style="margin:10px 0">${items.map(it=>`
+      <label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);margin:0">
+        <input type="checkbox" data-reconcile-check="${it.id}" style="width:auto;min-height:auto">
+        <span style="flex:1">${esc(it.name)} <span class="dim" style="font-size:11px">· ${STOCK_LABELS[it.status]||it.status} · coût ${eur(it.cost_basis)}${it.buy_date?` · ${fr(it.buy_date)}`:""}</span></span>
+      </label>`).join("") || `<p class="note">Aucun exemplaire trouvé (déjà retiré ?).</p>`}
+    </div>
+    <div class="actions">
+      <button class="btn ghost" data-close-btn>Ne rien supprimer</button>
+      <button class="btn danger" data-reconcile-delete="${lid}" data-order="${oid}">Supprimer la sélection</button>
+    </div>
+  `,"center");
 }
 
 function debitCheckBlock(o){
@@ -2581,15 +2605,41 @@ document.addEventListener("click", async ev=>{
       if(!line) return;
       const currency = document.getElementById("ole-currency-"+lid).value;
       const amount = document.getElementById("ole-amount-"+lid).value;
+      const newQty = parseInt(document.getElementById("ole-qty-"+lid).value||"1", 10) || 1;
+      const qtyChanged = newQty !== line.qty;
+      // La commande "reçue" peut déjà porter des frais réels saisis dessus :
+      // changer la quantité rejoue tout le prorata de la commande, jamais
+      // silencieusement une fois les montants réels connus.
+      if(qtyChanged && order.status==="recue"){
+        if(!confirm(`Cette commande est déjà reçue : des frais réels ont peut-être été saisis dessus. Changer la quantité de ${line.qty} à ${newQty} va recalculer la répartition sur toutes les lignes. Continuer ?`)) return;
+      }
       const body = {
-        name:line.name, type:line.type, qty:line.qty, unit_currency:currency, card_id:line.card_id,
+        name:line.name, type:line.type, qty:newQty, unit_currency:currency, card_id:line.card_id,
         resale_target_eur:document.getElementById("ole-resale-"+lid).value||null,
         resale_platform:document.getElementById("ole-platform-"+lid).value||null,
       };
       if(currency==="EUR"){ body.unit_price_eur = amount; body.unit_price_jpy = 0; }
       else { body.unit_price_jpy = amount; body.unit_price_eur = null; }
       await api(`/api/import-order-lines/${lid}`,{method:"PUT",json:body});
-      await loadCardDeals(); return importOrderSheet(oid);
+      await loadCardDeals();
+      // Quantité réduite sous ce qui est déjà en stock pour cette ligne :
+      // jamais de suppression automatique — on montre lesquels sont
+      // concernés et l'utilisateur choisit lui-même.
+      if(qtyChanged && newQty < (line.stock_count||0)){
+        await loadStock();
+        return lineStockReconcileSheet(lid, oid);
+      }
+      return importOrderSheet(oid);
+    }
+    const rdel = t.closest("[data-reconcile-delete]");
+    if(rdel){
+      const lid = rdel.dataset.reconcileDelete, oid = rdel.dataset.order;
+      const ids = [...document.querySelectorAll("[data-reconcile-check]:checked")].map(c=>c.dataset.reconcileCheck);
+      if(!ids.length) return alert("Sélectionne au moins un exemplaire à supprimer, ou ferme sans rien faire.");
+      if(!confirm(`Supprimer définitivement ${ids.length} exemplaire${ids.length>1?"s":""} du stock ?`)) return;
+      await Promise.all(ids.map(sid=>api(`/api/stock/${sid}`,{method:"DELETE"})));
+      await Promise.all([loadCardDeals(), loadStock()]);
+      return importOrderSheet(oid);
     }
     const sdeb = t.closest("[data-save-debit]");
     if(sdeb){
@@ -2611,8 +2661,14 @@ document.addEventListener("click", async ev=>{
     }
     const lts = t.closest("[data-line-to-stock]");
     if(lts){
-      if(!confirm("Envoyer cette carte au stock, au coût de revient calculé (article + part des frais/taxes) ?")) return;
-      await api(`/api/import-order-lines/${lts.dataset.lineToStock}/to-stock`,{method:"POST"});
+      const lid = lts.dataset.lineToStock;
+      const line = cardDeals.import_orders.flatMap(o=>o.lines).find(l=>l.id===lid);
+      const missing = line ? line.qty - (line.stock_count||0) : null;
+      const msg = (line && line.stock_count)
+        ? `Créer les ${missing} exemplaire(s) manquant(s) dans le stock, au coût de revient calculé ? Les ${line.stock_count} déjà en stock ne sont pas modifiés.`
+        : "Envoyer cette carte au stock, au coût de revient calculé (article + part des frais/taxes) ?";
+      if(!confirm(msg)) return;
+      await api(`/api/import-order-lines/${lid}/to-stock`,{method:"POST"});
       await Promise.all([loadCardDeals(), loadStock()]); return importOrderSheet(openOrderId);
     }
     const scs = t.closest("[data-save-card-settings]");
