@@ -1445,7 +1445,7 @@ def api_get_deal_thumb(did: str, pid: str):
 # Fiches carte (calcul inversé) et commandes d'import Japon. Indépendant de
 # `deals`/`deal_media` (chantier 5), laissés intacts et non affichés côté UI.
 
-CARD_SHEET_FIELDS = ["item_id", "name", "type", "grade", "lang", "set_name",
+CARD_SHEET_FIELDS = ["item_id", "name", "type", "grade", "lang", "set_name", "card_number",
                       "profit_target_pct", "profit_target_mode", "profit_target_eur", "cost_basis_estimate",
                       "resale_platform", "resale_mode",
                       "resale_min", "resale_median", "resale_max",
@@ -1463,6 +1463,7 @@ def clean_card_sheet(p: dict) -> dict:
         "grade": str(p.get("grade", ""))[:40],
         "lang": str(p.get("lang", ""))[:10],
         "set_name": str(p.get("set_name", ""))[:120],
+        "card_number": str(p.get("card_number", ""))[:40],
         "profit_target_pct": (max(0.0, numopt("profit_target_pct")) if numopt("profit_target_pct") is not None else None),
         "profit_target_mode": "eur" if p.get("profit_target_mode") == "eur" else "pct",
         "profit_target_eur": (max(0.0, numopt("profit_target_eur")) if numopt("profit_target_eur") is not None else None),
@@ -1950,6 +1951,16 @@ def clean_order_line(p: dict) -> dict:
         "resale_target_eur": (float(p["resale_target_eur"]) if p.get("resale_target_eur") not in (None, "") else None),
         "resale_platform": p.get("resale_platform") if p.get("resale_platform") in card_deals_mod.SELL_PLATFORMS else None,
         "card_id": (str(p["card_id"]) if p.get("card_id") else None),
+        # Champs d'identité facultatifs, jamais stockés sur la ligne (saisie
+        # volontairement pauvre du schéma, cf. _identity_fields_order_line) :
+        # utilisés une seule fois à l'écriture, pour rapprocher/créer la carte
+        # de référentiel correspondante quand card_id n'est pas déjà fourni
+        # (saisie de lot). Le quick-add classique (nom+prix+qté seuls) ne les
+        # envoie jamais : comportement strictement inchangé pour lui.
+        "set_name": str(p.get("set_name", ""))[:120],
+        "card_number": str(p.get("card_number", ""))[:40],
+        "lang": str(p.get("lang", ""))[:10],
+        "grade": str(p.get("grade", ""))[:40],
     }
 
 
@@ -1962,6 +1973,9 @@ def api_add_order_line(oid: str, p: dict = Body(...)):
     with db() as con:
         if not con.execute("SELECT 1 FROM import_orders WHERE id=?", (oid,)).fetchone():
             raise HTTPException(404, "commande introuvable")
+        if not d["card_id"] and (d["set_name"] or d["card_number"] or d["lang"] or d["grade"]):
+            d["card_id"], _ = _find_or_create_card(con, d["name"], d["set_name"], d["card_number"],
+                                                     d["lang"], d["grade"], d["type"])
         maxo = con.execute(
             "SELECT COALESCE(MAX(sort_order), -1) AS m FROM import_order_lines WHERE order_id=?", (oid,)
         ).fetchone()["m"]
@@ -1976,6 +1990,50 @@ def api_add_order_line(oid: str, p: dict = Body(...)):
              d["card_id"], overridden),
         )
     return {"id": lid}
+
+
+@app.post("/api/import-orders/{oid}/lines/bulk")
+def api_add_order_lines_bulk(oid: str, p: dict = Body(...)):
+    """Saisie tabulaire : plusieurs cartes différentes, chacune avec son
+    propre nom/prix/quantité, ajoutées à la même commande en un seul geste.
+    Chaque ligne suit le même chemin de rapprochement référentiel que
+    l'ajout unitaire (_find_or_create_card) ; tout est écrit dans une seule
+    transaction, donc soit toutes les lignes sont créées, soit aucune."""
+    raw_lines = p.get("lines")
+    if not isinstance(raw_lines, list) or not raw_lines:
+        raise HTTPException(400, "aucune ligne fournie")
+    if len(raw_lines) > 100:
+        raise HTTPException(400, "100 lignes maximum par envoi")
+
+    cleaned = [clean_order_line(raw) for raw in raw_lines]
+    for d in cleaned:
+        if not d["name"]:
+            raise HTTPException(400, "une ligne a un nom manquant")
+
+    ids = []
+    with db() as con:
+        if not con.execute("SELECT 1 FROM import_orders WHERE id=?", (oid,)).fetchone():
+            raise HTTPException(404, "commande introuvable")
+        maxo = con.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM import_order_lines WHERE order_id=?", (oid,)
+        ).fetchone()["m"]
+        for i, d in enumerate(cleaned):
+            if not d["card_id"] and (d["set_name"] or d["card_number"] or d["lang"] or d["grade"]):
+                d["card_id"], _ = _find_or_create_card(con, d["name"], d["set_name"], d["card_number"],
+                                                         d["lang"], d["grade"], d["type"])
+            overridden = _resale_overridden(con, d["card_id"], d["resale_target_eur"], d["resale_platform"])
+            lid = nid()
+            con.execute(
+                "INSERT INTO import_order_lines(id,order_id,item_id,name,type,qty,unit_currency,"
+                "unit_price_jpy,unit_price_eur,resale_target_eur,resale_platform,sort_order,card_id,"
+                "resale_target_overridden)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (lid, oid, d["item_id"], d["name"], d["type"], d["qty"], d["unit_currency"],
+                 d["unit_price_jpy"], d["unit_price_eur"], d["resale_target_eur"], d["resale_platform"],
+                 maxo + 1 + i, d["card_id"], overridden),
+            )
+            ids.append(lid)
+    return {"ids": ids, "count": len(ids)}
 
 
 @app.put("/api/import-order-lines/{lid}")
@@ -2184,6 +2242,71 @@ def api_add_stock(p: dict = Body(...)):
     return {"id": sid, "linked_item_id": iid}
 
 
+@app.post("/api/stock/bulk")
+def api_add_stock_bulk(p: dict = Body(...)):
+    """Saisie de lot : N exemplaires distincts d'une même carte en une seule
+    validation (achat loose en volume — jamais une quantité sur une ligne,
+    cf. le principe du module stock). Réutilise le référentiel (rapprochement
+    habituel via _find_or_create_card) et exactement le même schéma que la
+    création individuelle : chaque exemplaire est sa propre ligne stock_items
+    avec son propre statut et ses propres événements, pour un suivi
+    individuel du temps de vente même si tous partent du même lot."""
+    name = str(p.get("name", "")).strip()[:200]
+    if not name:
+        raise HTTPException(400, "nom manquant")
+    set_name = str(p.get("set_name", ""))[:120]
+    card_number = str(p.get("card_number", ""))[:40]
+    lang = str(p.get("lang", "FR"))[:10] or "FR"
+    grade = str(p.get("grade", ""))[:40]
+    type_ = p.get("type") if p.get("type") in ("loose", "gradee", "scelle") else "loose"
+    unit_price = max(0.0, float(p.get("unit_price") or 0))
+    qty = max(1, min(200, int(p.get("qty") or 1)))
+    buy_date = str(p.get("buy_date") or date.today().isoformat())[:10]
+    buy_platform = str(p.get("buy_platform", ""))[:80]
+    notes = str(p.get("notes", ""))[:2000]
+
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as con:
+        card_id, match_kind = _find_or_create_card(con, name, set_name, card_number, lang, grade, type_)
+        # Un seul item de rattachement pour tout le lot, pas un par exemplaire :
+        # regroupe l'historique de prix de cette carte plutôt que de le
+        # fragmenter en N items quasi vides. Réutilise celui d'un exemplaire
+        # déjà en stock pour cette carte, s'il en existe un.
+        existing = con.execute(
+            "SELECT linked_item_id FROM stock_items WHERE card_id=? AND linked_item_id IS NOT NULL LIMIT 1",
+            (card_id,),
+        ).fetchone()
+        if existing:
+            iid = existing["linked_item_id"]
+        else:
+            iid = nid()
+            con.execute(
+                "INSERT INTO items(id,name,type,lang,grade,set_name,qty,buy_price,buy_date,notes,status,target_price,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, name, type_, lang, grade, set_name, 1, 0.0, buy_date, "", "watch", 0.0, now),
+            )
+        ids = []
+        for _ in range(qty):
+            sid = nid()
+            d = {
+                "linked_item_id": iid, "name": name, "set_name": set_name, "card_number": card_number,
+                "lang": lang, "type": type_, "grade": grade, "cost_basis": unit_price,
+                "buy_date": buy_date, "buy_platform": buy_platform, "buy_url": "",
+                "target_price": None, "target_platform": None, "notes": notes,
+                "source_order_line_id": None, "card_id": card_id, "target_overridden": 0,
+                "nom_alternatif": "", "cert_number": "", "cert_organisme": "PSA", "cert_year": "",
+            }
+            con.execute(
+                f"INSERT INTO stock_items(id,{','.join(STOCK_FIELDS)},status,created_at) "
+                f"VALUES(?,{','.join('?' * len(STOCK_FIELDS))},?,?)",
+                (sid, *[d[f] for f in STOCK_FIELDS], "achete", now),
+            )
+            con.execute("INSERT INTO stock_events(id,stock_id,from_status,to_status,at) VALUES(?,?,?,?,?)",
+                        (nid(), sid, None, "achete", buy_date))
+            ids.append(sid)
+    return {"ids": ids, "count": len(ids), "card_id": card_id, "card_match": match_kind}
+
+
 @app.put("/api/stock/{sid}")
 def api_edit_stock(sid: str, p: dict = Body(...)):
     d = clean_stock_item(p)
@@ -2234,13 +2357,17 @@ def _listing_ctx_from_stock(stock_row: dict, card: dict | None) -> dict:
         if own:
             return own
         return (card.get(field) if card else None) or ""
+    raw_grade = pick("grade")
     return {
         "nom_fr": pick("name"), "nom_alt": pick("nom_alternatif"),
         "set": pick("set_name"), "numero": pick("card_number"),
-        "langue": pick("lang"), "grade": listings_mod.extract_grade_number(pick("grade")),
+        "langue": pick("lang"), "grade": listings_mod.extract_grade_number(raw_grade),
         "type_carte": STOCK_TYPE_LABELS.get(stock_row.get("type"), ""),
         "cert": stock_row.get("cert_number") or "",
-        "organisme": stock_row.get("cert_organisme") or "PSA",
+        # "PSA" par défaut seulement s'il y a effectivement un grade : sans
+        # grade (carte simple, non gradée), rien à afficher — un organisme de
+        # gradation sans note associée n'aurait aucun sens.
+        "organisme": (stock_row.get("cert_organisme") or "PSA") if raw_grade else "",
         "annee_gradation": stock_row.get("cert_year") or "",
     }
 
@@ -2305,12 +2432,13 @@ def api_generate_card_listing(cid: str, p: dict = Body(...)):
             raise HTTPException(404, "carte introuvable")
         card = dict(card)
     settings = get_listing_settings()
+    raw_grade = card.get("grade") or ""
     ctx = {
         "nom_fr": card.get("name") or "", "nom_alt": card.get("nom_alternatif") or "",
         "set": card.get("set_name") or "", "numero": card.get("card_number") or "",
-        "langue": card.get("lang") or "", "grade": listings_mod.extract_grade_number(card.get("grade") or ""),
+        "langue": card.get("lang") or "", "grade": listings_mod.extract_grade_number(raw_grade),
         "type_carte": STOCK_TYPE_LABELS.get(card.get("type"), ""),
-        "cert": "", "organisme": "PSA", "annee_gradation": "",
+        "cert": "", "organisme": "PSA" if raw_grade else "", "annee_gradation": "",
     }
     return listings_mod.build_listing(ctx, settings, p.get("platform"), p.get("style"))
 
@@ -2721,6 +2849,51 @@ def clean_card(p: dict) -> dict:
         "nom_alternatif": str(p.get("nom_alternatif", ""))[:200],
         "notes": str(p.get("notes", ""))[:2000],
     }
+
+
+def _find_or_create_card(con: sqlite3.Connection, name: str, set_name: str, card_number: str,
+                          lang: str, grade: str, type_: str) -> tuple[str, str]:
+    """Retrouve ou crée l'entrée de référentiel pour ces champs d'identité —
+    même algorithme que la migration (auto-link >= 0.92 sinon nouvelle carte,
+    cf. cards.classify). Sous le seuil auto mais au-dessus du seuil de
+    proposition, la carte est quand même créée (jamais de rapprochement
+    silencieux) et une proposition de fusion est journalisée pour l'écran de
+    fusion existant, plutôt que de laisser un doublon sans piste pour le
+    résoudre plus tard.
+
+    Utilisé par la saisie de lot (stock et lignes d'import) : le volume
+    (10-30 cartes par commande) rend un rapprochement manuel carte par carte
+    disproportionné, donc ce chemin est automatique — jamais silencieux pour
+    autant grâce à la proposition de fusion sous le seuil auto.
+
+    Renvoie (card_id, kind) où kind in ("auto", "created", "proposal")."""
+    name = (name or "").strip()
+    candidates = [dict(r) for r in con.execute(
+        "SELECT id, name, set_name, card_number, lang, grade, type FROM cards WHERE merged_into_id IS NULL"
+    )]
+    record = {"name": name, "set_name": set_name or "", "card_number": card_number or "",
+              "lang": lang or "", "grade": grade or "", "type": type_ or "loose"}
+    best, score = cards_mod.match_best(record, candidates)
+    kind = cards_mod.classify(score)
+    if kind == "auto" and best is not None:
+        return best["id"], "auto"
+
+    d = clean_card(record)
+    cid = nid()
+    ik = cards_mod.identity_key(d["name"], d["set_name"], d["card_number"], d["lang"], d["grade"])
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute(
+        f"INSERT INTO cards(id,{','.join(CARD_FIELDS)},identity_key,created_at) "
+        f"VALUES(?,{','.join('?' * len(CARD_FIELDS))},?,?)",
+        (cid, *[d[f] for f in CARD_FIELDS], ik, now),
+    )
+    if kind == "proposal" and best is not None:
+        con.execute(
+            "INSERT INTO card_merge_suggestions(id,card_a_id,card_b_id,score,status,created_at) VALUES(?,?,?,?,?,?)",
+            (nid(), cid, best["id"], score, "pending", now),
+        )
+        return cid, "proposal"
+    return cid, "created"
 
 
 def _resale_overridden(con: sqlite3.Connection, card_id: str | None, target, platform) -> int:
@@ -3553,10 +3726,10 @@ async def api_import(file: UploadFile = File(...), replace: bool = True):
                     photo_h = cs.get("photo_height")
             con.execute(
                 f"INSERT OR REPLACE INTO card_sheets(id,{','.join(CARD_SHEET_FIELDS)},"
-                "photo_id,photo_size_bytes,photo_width,photo_height,card_id,card_number,created_at) "
-                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?,?,?,?,?,?,?)",
+                "photo_id,photo_size_bytes,photo_width,photo_height,card_id,created_at) "
+                f"VALUES(?,{','.join('?' * len(CARD_SHEET_FIELDS))},?,?,?,?,?,?)",
                 (sid, *[csd[f] for f in CARD_SHEET_FIELDS],
-                 photo_id, photo_size, photo_w, photo_h, cs.get("card_id"), str(cs.get("card_number", ""))[:40],
+                 photo_id, photo_size, photo_w, photo_h, cs.get("card_id"),
                  str(cs.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
             )
             for lst in cs.get("listings") or []:

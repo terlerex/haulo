@@ -76,6 +76,50 @@ DEFAULT_DESCRIPTION_TEMPLATES = {
     ),
 }
 
+# --- Gabarits "carte simple" (pas de grade) : bascule automatique quand
+# {grade} est vide, cf. build_listing() plus bas. Une carte non gradée n'a ni
+# organisme de certification ni numéro vérifiable — mentionner "PSA" ou
+# "carte gradée" dessus serait une information inventée, pas une ligne qui
+# disparaît proprement (le titre n'a pas de suppression ligne par ligne comme
+# la description ; "PSA" y est un mot du gabarit, jamais une variable qui
+# pourrait s'effacer). D'où un gabarit distinct plutôt qu'un simple drop de
+# ligne, qui ne suffirait qu'à la description.
+DEFAULT_TITLE_TEMPLATE_LOOSE = "Carte Pokémon {nom_fr} {type_carte} {numero} {set} {langue}"
+
+DEFAULT_DESCRIPTION_TEMPLATES_LOOSE = {
+    "detaille": (
+        "{nom_fr} {nom_alt}\n"
+        "{set} · {numero} · Version {langue}\n"
+        "\n"
+        "• Photos de l'exemplaire exact que vous recevrez\n"
+        "\n"
+        "Expédition {delai_expedition}. Pochette et protection adaptée. "
+        "Une question, une photo en plus ? Écrivez-moi. D'autres cartes dans mon dressing. "
+        "Réductions sur les lots.\n"
+        "\n"
+        "Pokémon, {nom_fr}, {set}, {numero}, carte TCG, collection"
+    ),
+    "court": (
+        "{nom_fr} {nom_alt}\n"
+        "{set} · {numero} · Version {langue}\n"
+        "\n"
+        "Expédition {delai_expedition}. Question ? Écrivez-moi — autres cartes dans mon dressing.\n"
+        "\n"
+        "Pokémon, {nom_fr}, {set}, {numero}"
+    ),
+    "chaleureux": (
+        "{nom_fr} {nom_alt}\n"
+        "\n"
+        "Un bel article à ajouter à votre vitrine : {set}, {numero}, version {langue}.\n"
+        "\n"
+        "Expédition {delai_expedition}, protection adaptée (pochette, papier bulle si besoin).\n"
+        "\n"
+        "Des questions sur cet article ou un autre ? Je réponds toujours. D'autres pièces à découvrir dans mon dressing.\n"
+        "\n"
+        "Pokémon, {nom_fr}, {set}, {numero}"
+    ),
+}
+
 DESCRIPTION_STYLES = ["detaille", "court", "chaleureux"]
 STYLE_LABELS = {"detaille": "Détaillé", "court": "Court", "chaleureux": "Chaleureux"}
 PLATFORMS = ["vinted", "ebay"]
@@ -83,7 +127,9 @@ PLATFORM_LABELS = {"vinted": "Vinted", "ebay": "eBay"}
 
 DEFAULT_LISTING_SETTINGS = {
     "title_template": DEFAULT_TITLE_TEMPLATE,
+    "title_template_loose": DEFAULT_TITLE_TEMPLATE_LOOSE,
     "description_templates": dict(DEFAULT_DESCRIPTION_TEMPLATES),
+    "description_templates_loose": dict(DEFAULT_DESCRIPTION_TEMPLATES_LOOSE),
     "platforms": {"vinted": {"title_limit": 75}, "ebay": {"title_limit": 80}},
     "default_platform": "vinted",
     "default_style": "detaille",
@@ -98,6 +144,8 @@ def merge_listing_settings(stored: dict | None) -> dict:
     de l'app)."""
     s = {**DEFAULT_LISTING_SETTINGS, **(stored or {})}
     s["description_templates"] = {**DEFAULT_DESCRIPTION_TEMPLATES, **(stored or {}).get("description_templates", {})}
+    s["description_templates_loose"] = {**DEFAULT_DESCRIPTION_TEMPLATES_LOOSE,
+                                         **(stored or {}).get("description_templates_loose", {})}
     s["platforms"] = {
         p: {**DEFAULT_LISTING_SETTINGS["platforms"][p], **(stored or {}).get("platforms", {}).get(p, {})}
         for p in PLATFORMS
@@ -197,8 +245,16 @@ def build_listing(ctx: dict, settings: dict, platform: str, style: str) -> dict:
     settings = merge_listing_settings(settings)
     platform = platform if platform in PLATFORMS else settings["default_platform"]
     style = style if style in DESCRIPTION_STYLES else settings["default_style"]
-    title_tpl = settings["title_template"]
-    desc_tpl = settings["description_templates"].get(style, DEFAULT_DESCRIPTION_TEMPLATES[style])
+    # Bascule automatique sur le gabarit "carte simple" (sans grade/PSA/cert)
+    # dès que ctx ne porte aucun grade — jamais un gabarit gradé avec un trou
+    # à la place de "PSA {grade}".
+    is_graded = bool(ctx.get("grade"))
+    if is_graded:
+        title_tpl = settings["title_template"]
+        desc_tpl = settings["description_templates"].get(style, DEFAULT_DESCRIPTION_TEMPLATES[style])
+    else:
+        title_tpl = settings["title_template_loose"]
+        desc_tpl = settings["description_templates_loose"].get(style, DEFAULT_DESCRIPTION_TEMPLATES_LOOSE[style])
 
     if contains_url(title_tpl) or contains_url(desc_tpl):
         return {
@@ -222,7 +278,7 @@ def build_listing(ctx: dict, settings: dict, platform: str, style: str) -> dict:
 
     limit = settings["platforms"].get(platform, {}).get("title_limit", 80)
     warnings = []
-    if not full_ctx.get("cert"):
+    if is_graded and not full_ctx.get("cert"):
         warnings.append("Numéro de certification manquant — c'est ce qui rassure le plus l'acheteur, pense à le renseigner.")
     if len(title) > limit:
         warnings.append(f"Titre trop long pour {PLATFORM_LABELS.get(platform, platform)} : "
@@ -231,7 +287,7 @@ def build_listing(ctx: dict, settings: dict, platform: str, style: str) -> dict:
     return {
         "blocked": False,
         "title": title, "description": description,
-        "platform": platform, "style": style,
+        "platform": platform, "style": style, "is_graded": is_graded,
         "title_length": len(title), "title_limit": limit,
         "warnings": warnings,
     }
