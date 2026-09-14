@@ -123,6 +123,23 @@ def resale_range_from_comps(comps: list[dict], window_days: int = 90) -> dict:
 
 # ------------------------------------------------------------- fiche carte
 
+# Au-delà de ce seuil, le frais FIXE seul (hors commission %) représente une
+# part du prix jugée disproportionnée — utile sur du loose bon marché (2-5€)
+# où un 0,35€ eBay pèse plus de 10% du prix, ce qu'aucun pourcentage
+# n'exprime : c'est justement le point mort où vendre à l'unité cesse d'avoir
+# un sens économique. Simple indicateur, jamais bloquant.
+FIXED_FEE_WARNING_THRESHOLD_PCT = 10.0
+
+
+def fixed_fee_share_pct(price: float, sell_fee: dict) -> float | None:
+    """Part du frais FIXE (hors commission %) dans `price`, en % — None si le
+    prix est nul (rien à rapporter à) ou si la plateforme n'a pas de frais fixe."""
+    fixed = float(sell_fee.get("fixed", 0))
+    if not price or not fixed:
+        return None
+    return round(fixed / price * 100, 1)
+
+
 def net_from_resale(price: float, sell_fee: dict, my_shipping_cost: float) -> dict:
     """N = P x (1-f) - F - E : net encaissé pour un prix de revente P donné,
     f/F = commission/frais fixe de la plateforme de revente, E = mon coût
@@ -134,8 +151,10 @@ def net_from_resale(price: float, sell_fee: dict, my_shipping_cost: float) -> di
     if cap is not None:
         commission = min(commission, float(cap))
     net = price - commission - my_shipping_cost
+    fee_pct = fixed_fee_share_pct(price, sell_fee)
     return {"price": price, "commission": round(commission, 2),
-            "my_shipping_cost": round(my_shipping_cost, 2), "net": round(net, 2)}
+            "my_shipping_cost": round(my_shipping_cost, 2), "net": round(net, 2),
+            "fixed_fee_pct": fee_pct, "fixed_fee_high": bool(fee_pct and fee_pct > FIXED_FEE_WARNING_THRESHOLD_PCT)}
 
 
 def sell_min_price(net_required: float, sell_fee: dict, my_shipping_cost: float) -> float:
@@ -276,7 +295,10 @@ def build_card_sheet_view(sheet: dict, listings: list[dict], settings: dict,
             for plat in ("ebay", "vinted", "cardmarket"):
                 fee = settings["sell_fees"].get(plat, {})
                 price_min = sell_min_price(net_required, fee, e)
-                rows.append({"platform": plat, "price_min": round(price_min, 2) if price_min is not None else None})
+                price_min_r = round(price_min, 2) if price_min is not None else None
+                fee_pct = fixed_fee_share_pct(price_min_r, fee) if price_min_r else None
+                rows.append({"platform": plat, "price_min": price_min_r,
+                             "fixed_fee_pct": fee_pct, "fixed_fee_high": bool(fee_pct and fee_pct > FIXED_FEE_WARNING_THRESHOLD_PCT)})
             sell_min = {"cost_basis": round(c_min, 2), "profit_target_eur": round(obj_eur, 2),
                         "my_shipping_cost": round(e, 2), "net_required": round(net_required, 2), "rows": rows}
     else:

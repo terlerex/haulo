@@ -287,6 +287,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
     <div class="filters" id="stock-toolbar" style="display:none">
       <button class="btn primary" data-open-card-picker>+ Choisir une carte (référentiel)</button>
       <button class="btn" data-action="new-stock">+ Saisie libre</button>
+      <button class="btn" data-open-bulk-stock title="N exemplaires identiques d'une même carte, en une seule saisie">+ Saisie de lot</button>
       <button class="btn primary" data-action="pick-a-card">🎯 Pick a card</button>
     </div>
     <div class="filters" id="stock-tabs" style="display:none">
@@ -321,6 +322,7 @@ let cardDeals = null, openSheetId = null, openOrderId = null;
 let cardFilter = "all", cardQuery = "";  // état d'écran uniquement, jamais persisté en base
 const BUY_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket", japan:"Proxy Japon"};
 const SELL_PLATFORM_LABELS = {ebay:"eBay", vinted:"Vinted", cardmarket:"Cardmarket"};
+const FIXED_FEE_WARNING_PCT = 10; // cf. card_deals.FIXED_FEE_WARNING_THRESHOLD_PCT, même seuil
 
 async function loadCardDeals(){
   cardDeals = await api("/api/card-deals");
@@ -760,6 +762,7 @@ function scenarioBlock(sc, title){
       <span class="eyebrow">${title} — revente visée ${eur(sc.resale_price)}</span>
       <span class="num" style="font-weight:650">${eur(sc.c_max)}</span>
     </div>
+    ${sc.net.fixed_fee_high ? `<div class="warn" style="margin-bottom:8px">⚠ Les frais fixes de la plateforme de revente représentent ${sc.net.fixed_fee_pct.toFixed(1).replace(".",",")} % du prix de revente — à ce niveau de prix, vendre à l'unité peut ne pas être rentable.</div>` : ""}
     ${sc.rows.map(cardSheetRow).join("")}
     <details style="margin-top:8px">
       <summary class="eyebrow" style="cursor:pointer">Détail du calcul</summary>
@@ -783,11 +786,15 @@ function sellMinBlock(sm){
       <span class="eyebrow">Coût de revient ${eur(sm.cost_basis)} + objectif ${eur(sm.profit_target_eur)}</span>
       <span class="num" style="font-weight:650">${eur(sm.net_required)}</span>
     </div>
-    ${sm.rows.map(r=>`<div class="comp" style="grid-template-columns:1fr auto">
-      <span>${esc(SELL_PLATFORM_LABELS[r.platform]||r.platform)}</span>
+    ${sm.rows.map(r=>{
+      const feeTag = r.fixed_fee_high ? ` <span class="dim" title="Frais fixe seul = ${r.fixed_fee_pct.toFixed(1).replace(".",",")} % de ce prix">⚠ frais fixe ${r.fixed_fee_pct.toFixed(1).replace(".",",")} %</span>` : "";
+      return `<div class="comp" style="grid-template-columns:1fr auto">
+      <span>${esc(SELL_PLATFORM_LABELS[r.platform]||r.platform)}${feeTag}</span>
       <span class="p">${r.price_min!=null?eur(r.price_min):"—"}</span>
-    </div>`).join("")}
+    </div>`;
+    }).join("")}
     <p class="note" style="margin-top:8px">Prix de vente minimum pour encaisser ${eur(sm.net_required)} net (coût de revient + objectif), après commission de la plateforme et ${eur(sm.my_shipping_cost)} de frais d'envoi/emballage à ta charge.</p>
+    ${sm.rows.some(r=>r.fixed_fee_high) ? `<p class="note">⚠ Sur au moins une plateforme, le frais fixe seul dépasse ${FIXED_FEE_WARNING_PCT}% du prix minimum calculé — à ce niveau de prix, vendre à l'unité peut ne pas être rentable.</p>` : ""}
   </div>`;
 }
 
@@ -862,10 +869,11 @@ function cardSheetSheet(id){
       </select></label>
     </div>
     <div class="f3">
-      <label id="cs-grade-wrap" style="${s?.type==="scelle"?"display:none":""}"><span class="lb">Grade</span><input id="cs-grade" value="${esc(s?.grade||"")}" placeholder="PSA 10"></label>
+      <label id="cs-grade-wrap" style="${s?.type!=="gradee"?"display:none":""}"><span class="lb">Grade</span><input id="cs-grade" value="${esc(s?.grade||"")}" placeholder="PSA 10"></label>
       <label><span class="lb">Langue</span><input id="cs-lang" value="${esc(s?.lang||"")}" placeholder="JP"></label>
       <label><span class="lb">Set</span><input id="cs-set" value="${esc(s?.set_name||"")}" placeholder="EV02"></label>
     </div>
+    <label><span class="lb">Numéro</span><input id="cs-number" value="${esc(s?.card_number||"")}" placeholder="006/165"></label>
     <hr class="sep">
     <div class="f2">
       <label><span class="lb">Objectif de bénéfice</span>
@@ -931,7 +939,9 @@ function cardSheetSheet(id){
   const typeSel = document.getElementById("cs-type");
   if(typeSel) typeSel.addEventListener("change", ()=>{
     const isScelle = typeSel.value==="scelle";
-    document.getElementById("cs-grade-wrap").style.display = isScelle ? "none" : "";
+    // Seule une carte gradée a un grade — "loose" (carte simple) et "scellé"
+    // n'en ont pas, même s'ils ne se ressemblent pas pour le reste.
+    document.getElementById("cs-grade-wrap").style.display = typeSel.value==="gradee" ? "" : "none";
     const nameInp = document.getElementById("cs-name");
     if(nameInp) nameInp.placeholder = isScelle ? "Display EV08" : "Dracaufeu ex";
   });
@@ -1162,6 +1172,8 @@ function importOrderSheet(id){
     <div style="margin:8px 0 14px">${o.lines.map(l=>orderLineRow(l,o)).join("") || `<p class="note">Aucune ligne pour l'instant.</p>`}</div>
     <div class="actions" style="justify-content:flex-start;margin-bottom:10px">
       <button class="btn primary" data-open-card-picker data-picker-order="${o.id}">+ Choisir une carte (référentiel)</button>
+      <button class="btn" data-open-bulk-stock data-bulk-order="${o.id}" title="Une carte, plusieurs exemplaires au même prix, en une ligne">+ Saisie de lot</button>
+      <button class="btn" data-open-bulk-order-lines="${o.id}" title="Plusieurs cartes différentes, chacune sa ligne, en un seul envoi">+ Saisie tabulaire</button>
     </div>
     <p class="note">Ou saisie libre, sans lien au référentiel :</p>
     <div class="f3">
@@ -1193,6 +1205,70 @@ function importOrderSheet(id){
     document.getElementById("ol-price-lb").textContent = eurMode ? "Prix unitaire (€)" : "Prix unitaire (¥)";
     document.getElementById("ol-price").step = eurMode ? "0.01" : "1";
   });
+}
+
+/* ---------------- saisie de lot (loose bon marché, en volume) ---------------- */
+let bulkStockCtx = null; // {type:"stock"} | {type:"order", orderId}
+
+function bulkStockForm(ctx){
+  bulkStockCtx = ctx;
+  const forOrder = ctx.type==="order";
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Saisie de lot</span>
+      <h2>${forOrder?"Ajouter à la commande":"Nouveaux exemplaires"}</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">Une carte, plusieurs exemplaires identiques au même prix — ${forOrder
+      ? "une seule ligne de commande, à quantité N."
+      : "chacun devient sa propre ligne de stock, avec son propre statut ensuite."}</p>
+    <div class="f2">
+      <label><span class="lb">Nom</span><input id="bs-name" placeholder="Dracaufeu ex"></label>
+      <label><span class="lb">Set</span><input id="bs-set" placeholder="EV02"></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Numéro</span><input id="bs-number"></label>
+      <label><span class="lb">Langue</span><input id="bs-lang" value="FR"></label>
+    </div>
+    <div class="f2">
+      <label><span class="lb">Prix unitaire (€)</span><input id="bs-price" type="number" min="0" step="0.01" placeholder="3,50"></label>
+      <label><span class="lb">Quantité</span><input id="bs-qty" type="number" min="1" step="1" value="1"></label>
+    </div>
+    ${forOrder ? "" : `<label><span class="lb">Date d'achat</span><input id="bs-date" type="date" value="${today()}"></label>`}
+    <div class="actions">
+      <button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-save-bulk-stock>${forOrder?"Ajouter la ligne":"Créer les exemplaires"}</button>
+    </div>
+  `,"center");
+}
+
+function bulkOrderLineRowHtml(i){
+  return `<div class="bol-row" data-bol-row="${i}" style="border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px">
+    <div class="f3">
+      <label><span class="lb">Nom</span><input id="bol-name-${i}" placeholder="Pikachu promo"></label>
+      <label><span class="lb">Set</span><input id="bol-set-${i}"></label>
+      <label><span class="lb">Numéro</span><input id="bol-number-${i}"></label>
+    </div>
+    <div class="f3">
+      <label><span class="lb">Langue</span><input id="bol-lang-${i}" value="FR"></label>
+      <label><span class="lb">Prix unitaire (¥)</span><input id="bol-price-${i}" type="number" min="0" step="1"></label>
+      <label><span class="lb">Quantité</span><input id="bol-qty-${i}" type="number" min="1" step="1" value="1"></label>
+    </div>
+  </div>`;
+}
+let bulkOrderRowCount = 0;
+function bulkOrderLinesForm(orderId){
+  bulkOrderRowCount = 5;
+  const rows = Array.from({length: 5}, (_, i) => bulkOrderLineRowHtml(i)).join("");
+  openSheet(`
+    <div class="sheet-head"><div><span class="eyebrow">Saisie tabulaire</span><h2>Plusieurs cartes, un seul envoi</h2></div>
+      <button class="btn ghost" data-close-btn>Fermer</button></div>
+    <p class="note">Une ligne par carte différente, prix et quantité propres à chacune. Les lignes sans nom sont ignorées à l'enregistrement.</p>
+    <div id="bol-rows">${rows}</div>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" data-bol-add-row>+ Ligne</button></div>
+    <div class="actions">
+      <button class="btn ghost" data-close-btn>Annuler</button>
+      <button class="btn primary" data-save-bulk-order-lines="${orderId}">Enregistrer les lignes</button>
+    </div>
+  `,"bottom");
 }
 
 function cardSettingsForm(){
@@ -1420,10 +1496,10 @@ function stockSheet(id){
       </select></label>
     </div>
     <div class="f2">
-      <label id="st-grade-wrap" style="${r?.type==="scelle"?"display:none":""}"><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
+      <label id="st-grade-wrap" style="${r?.type!=="gradee"?"display:none":""}"><span class="lb">Grade</span><input id="st-grade" value="${esc(r?.grade||"")}" placeholder="PSA 10"></label>
       <label><span class="lb">Nom original</span><input id="st-nomalt" value="${esc(r?.nom_alternatif||"")}" placeholder="ピカチュウ"></label>
     </div>
-    <div class="f3">
+    <div class="f3" id="st-cert-wrap" style="${r?.type!=="gradee"?"display:none":""}">
       <label><span class="lb">N° de certification</span><input id="st-cert" value="${esc(r?.cert_number||"")}" placeholder="123456789"></label>
       <label><span class="lb">Organisme</span><input id="st-certorg" value="${esc(r?.cert_organisme||"PSA")}"></label>
       <label><span class="lb">Année de gradation</span><input id="st-certyear" value="${esc(r?.cert_year||"")}" placeholder="2024"></label>
@@ -1476,7 +1552,11 @@ function stockSheet(id){
   const stTypeSel = document.getElementById("st-type");
   if(stTypeSel) stTypeSel.addEventListener("change", ()=>{
     const isScelle = stTypeSel.value==="scelle";
-    document.getElementById("st-grade-wrap").style.display = isScelle ? "none" : "";
+    const isGradee = stTypeSel.value==="gradee";
+    // Grade et certification n'ont de sens que pour une carte gradée —
+    // "loose" (carte simple) et "scellé" n'en ont ni l'un ni l'autre.
+    document.getElementById("st-grade-wrap").style.display = isGradee ? "" : "none";
+    document.getElementById("st-cert-wrap").style.display = isGradee ? "grid" : "none";
     const nameInp = document.getElementById("st-name");
     if(nameInp) nameInp.placeholder = isScelle ? "Display EV08" : "Dracaufeu ex";
   });
@@ -2219,6 +2299,62 @@ document.addEventListener("click", async ev=>{
       const ctx = ocp.dataset.pickerOrder ? {type:"order", orderId:ocp.dataset.pickerOrder} : {type:"stock"};
       return openCardPicker(ctx);
     }
+    const obs = t.closest("[data-open-bulk-stock]");
+    if(obs){
+      const ctx = obs.dataset.bulkOrder ? {type:"order", orderId:obs.dataset.bulkOrder} : {type:"stock"};
+      return bulkStockForm(ctx);
+    }
+    const sbs = t.closest("[data-save-bulk-stock]");
+    if(sbs){
+      const g = x => document.getElementById(x).value.trim();
+      const name = g("bs-name");
+      if(!name) return document.getElementById("bs-name").focus();
+      const ctx = bulkStockCtx || {type:"stock"};
+      const qty = g("bs-qty") || "1";
+      const price = g("bs-price") || "0";
+      if(ctx.type==="order"){
+        await api(`/api/import-orders/${ctx.orderId}/lines`,{json:{
+          name, set_name:g("bs-set"), card_number:g("bs-number"), lang:g("bs-lang")||"FR",
+          qty, unit_currency:"EUR", unit_price_eur:price,
+        }});
+        await loadCardDeals(); return importOrderSheet(ctx.orderId);
+      }
+      const r = await api("/api/stock/bulk",{json:{
+        name, set_name:g("bs-set"), card_number:g("bs-number"), lang:g("bs-lang")||"FR",
+        unit_price:price, qty, buy_date:g("bs-date"),
+      }});
+      await loadStock(); closeSheet();
+      alert(`${r.count} exemplaire${r.count>1?"s créés":" créé"}.`);
+      return renderRows();
+    }
+    const oboLines = t.closest("[data-open-bulk-order-lines]");
+    if(oboLines) return bulkOrderLinesForm(oboLines.dataset.openBulkOrderLines);
+    const bolAdd = t.closest("[data-bol-add-row]");
+    if(bolAdd){
+      document.getElementById("bol-rows").insertAdjacentHTML("beforeend", bulkOrderLineRowHtml(bulkOrderRowCount++));
+      return;
+    }
+    const sbol = t.closest("[data-save-bulk-order-lines]");
+    if(sbol){
+      const oid = sbol.dataset.saveBulkOrderLines;
+      const lines = [];
+      document.querySelectorAll("[data-bol-row]").forEach(row=>{
+        const i = row.dataset.bolRow;
+        const name = document.getElementById(`bol-name-${i}`).value.trim();
+        if(!name) return;
+        lines.push({
+          name, set_name: document.getElementById(`bol-set-${i}`).value,
+          card_number: document.getElementById(`bol-number-${i}`).value,
+          lang: document.getElementById(`bol-lang-${i}`).value || "FR",
+          unit_currency: "JPY",
+          unit_price_jpy: document.getElementById(`bol-price-${i}`).value || 0,
+          qty: document.getElementById(`bol-qty-${i}`).value || 1,
+        });
+      });
+      if(!lines.length) return alert("Aucune ligne à enregistrer : renseigne au moins un nom.");
+      await api(`/api/import-orders/${oid}/lines/bulk`,{json:{lines}});
+      await loadCardDeals(); closeSheet(); return importOrderSheet(oid);
+    }
     const pp = t.closest("[data-picker-pick]");
     if(pp) return pickCard(cardPickerCards.find(c=>c.id===pp.dataset.pickerPick));
     const pcr = t.closest("[data-picker-create]");
@@ -2300,7 +2436,7 @@ document.addEventListener("click", async ev=>{
       const targetMode = g("cs-target-mode");
       const body = {
         item_id: g("cs-item")||null, name:g("cs-name"), type:g("cs-type"), grade:g("cs-grade"),
-        lang:g("cs-lang"), set_name:g("cs-set"),
+        lang:g("cs-lang"), set_name:g("cs-set"), card_number:g("cs-number"),
         profit_target_mode: targetMode,
         profit_target_pct: targetMode==="pct" ? (g("cs-target")||null) : null,
         profit_target_eur: targetMode==="eur" ? (g("cs-target")||null) : null,
